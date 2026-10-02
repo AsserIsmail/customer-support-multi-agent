@@ -8,6 +8,11 @@ version = "0.1.0"
 description = "Customer support assistant backed by customer records and policy documents"
 requires-python = ">=3.10"
 dependencies = [
+    "fastapi>=0.115,<1",
+    "streamlit>=1.45,<2",
+    "httpx>=0.28,<1",
+    "uvicorn>=0.31,<1",
+    "python-multipart>=0.0.9,<1",
     "langgraph>=1,<2",
     "langchain-openai>=1,<2",
     "mcp>=2.2,<3",
@@ -28,6 +33,7 @@ support-demo-pdfs = "support_ai.demo_pdfs:main"
 support-mcp = "support_ai.mcp_server:main"
 support-mcp-check = "support_ai.mcp_client:main"
 support-chat = "support_ai.chat:main"
+support-api = "support_ai.api:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
