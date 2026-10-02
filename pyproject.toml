@@ -6,7 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "customer-support-multi-agent"
 version = "0.1.0"
 description = "Customer support assistant backed by customer records and policy documents"
-requires-python = ">=3.10"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi>=0.115,<1",
     "streamlit>=1.45,<2",

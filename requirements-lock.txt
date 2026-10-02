@@ -1,4 +1,4 @@
-# Tested on Windows with Python 3.13.3; regenerate when dependencies change.
+# Tested Windows/Python 3.13 pins. Linux may resolve additional platform dependencies.
 aiohappyeyeballs==2.7.1
 aiohttp==3.14.3
 aiosignal==1.4.0
@@ -96,7 +96,7 @@ pytest==8.4.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4
 python-multipart==0.0.32
-pywin32==312
+pywin32==312; sys_platform == "win32"
 PyYAML==6.0.3
 referencing==0.37.0
 regex==2026.9.29
