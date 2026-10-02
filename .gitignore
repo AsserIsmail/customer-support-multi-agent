@@ -19,3 +19,5 @@ logs/
 *.sqlite*
 *.log
 .idea/
+output/
+tmp/
