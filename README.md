@@ -12,12 +12,15 @@ tests are implemented. FastAPI serves chat and PDF uploads; Streamlit provides t
 web interface. A terminal chat, Docker configuration, and CI workflow are included.
 
 
-The local application has been tested on Windows/Python 3.13. Docker Compose
-configuration validates; container build/startup and hosted CI are not yet verified.
+The local application has been tested on Windows/Python 3.13. Hosted CI passed
+on Windows and Linux, including a Docker image build and container test run.
+Docker Compose configuration validates; local Compose startup remains unverified
+because the local Docker engine is not responding.
 
 The phase branches form a stack: each includes the preceding phase's commits.
-The latest implementation is on `phase/06-delivery`; `main` is not automatically
-updated. Review the final branch and open a pull request to `main`.
+The complete implementation is delivered through
+[pull request #1](https://github.com/AsserIsmail/customer-support-multi-agent/pull/1)
+from `phase/06-delivery` to `main`.
 
 ## Architecture
 
