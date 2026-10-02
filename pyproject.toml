@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Customer support assistant backed by customer records and policy documents"
 requires-python = ">=3.10"
 dependencies = [
+    "mcp>=2.2,<3",
     "chromadb>=1.0,<2",
     "openai>=2,<3",
     "PyMuPDF>=1.26,<2",
@@ -22,6 +23,8 @@ dev = ["pytest>=8,<9"]
 support-seed = "support_ai.seed:main"
 support-policies = "support_ai.policies:main"
 support-demo-pdfs = "support_ai.demo_pdfs:main"
+support-mcp = "support_ai.mcp_server:main"
+support-mcp-check = "support_ai.mcp_client:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -126,7 +126,7 @@ def _vectors(embedder: Embedder, texts: list[str]) -> list[list[float]]:
 
 
 class PolicyIndex:
-    def __init__(self, settings: PolicySettings, embedder: Embedder | None = None):
+    def __init__(self, settings: PolicySettings, embedder: Embedder | None = None, *, create: bool = True):
         settings.validate()
         self.settings = settings
         self.embedder = embedder or OpenAIEmbedder(settings.embedding_model)
@@ -135,13 +135,18 @@ class PolicyIndex:
         metadata = {"embedding_model": self.embedder.model, "schema_version": 1,
                     "chunk_size": settings.chunk_size, "chunk_overlap": settings.chunk_overlap}
         try:
+            if not create and not (settings.chroma_path / "chroma.sqlite3").is_file():
+                raise PolicyError("Policy index is missing; ingest policy PDFs first.")
             self.client = chromadb.PersistentClient(
                 path=str(settings.chroma_path), settings=ChromaSettings(anonymized_telemetry=False),
             )
-            self.collection = self.client.get_or_create_collection(
-                settings.collection, embedding_function=None, metadata=metadata,
-                configuration={"hnsw": {"space": "cosine"}},
-            )
+            if create:
+                self.collection = self.client.get_or_create_collection(
+                    settings.collection, embedding_function=None, metadata=metadata,
+                    configuration={"hnsw": {"space": "cosine"}},
+                )
+            else:
+                self.collection = self.client.get_collection(settings.collection, embedding_function=None)
             actual = self.collection.metadata or {}
             if any(actual.get(key) != value for key, value in metadata.items()):
                 raise PolicyError("Index configuration changed; select a new CHROMA_COLLECTION and reingest.")
