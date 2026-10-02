@@ -5,14 +5,21 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-**Phases 1 through 5: locally runnable support application.** Configuration, reproducible fictional
+**Locally runnable support application.** Configuration, reproducible fictional
 data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
 Chroma search, an official SDK MCP server/client, a LangGraph assistant, and automated
 tests are implemented. FastAPI serves chat and PDF uploads; Streamlit provides the
-web interface. A terminal chat is also available. Final packaging and Docker are
-planned for Phase 6.
+web interface. A terminal chat, Docker configuration, and CI workflow are included.
 
-## Planned architecture
+
+The local application has been tested on Windows/Python 3.13. Docker Compose
+configuration validates; container build/startup and hosted CI are not yet verified.
+
+The phase branches form a stack: each includes the preceding phase's commits.
+The latest implementation is on `phase/06-delivery`; `main` is not automatically
+updated. Review the final branch and open a pull request to `main`.
+
+## Architecture
 
 ```text
 Streamlit -> FastAPI -> LangGraph supervisor
@@ -32,22 +39,25 @@ supporting follow-up questions. The graph and data services are independently te
 
 ## Local setup (PowerShell)
 
-Python 3.10 or newer is required; development was tested on Windows with Python
-3.13.3. Use an isolated virtual environment:
+Use **Python 3.13**; development was tested on Windows with Python 3.13.3.
+The supported Python range is deliberately limited to the verified minor version.
+Use an isolated virtual environment:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
 .\.venv\Scripts\python.exe -m support_ai.seed
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
 `requirements-lock.txt` records the tested Windows/Python 3.13 dependency versions.
-For the same environment, install it before the editable package:
+Windows-only dependencies have platform markers. Linux may resolve additional
+platform-specific dependencies, and its execution is not yet verified locally.
+For development with newly resolved compatible versions instead of the lock:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
 On macOS/Linux, use `.venv/bin/python` instead of the Windows interpreter path.
@@ -173,6 +183,52 @@ echoing request contents or raw provider exceptions.
 - API access logging is disabled by the launcher to avoid logging conversation
   identifiers from upload URLs. Operational logs contain failure classes and
   routing decisions, not keys or full request bodies.
+
+## Docker (optional)
+
+Prerequisites: Docker Desktop with its Linux-container engine running and Docker
+Compose v2. Keep your local `.env` at the repository root. The API receives the key
+at runtime; the build context excludes `.env`, generated data, uploads, and logs.
+The Streamlit container receives no OpenAI key. The image runs as a non-root user.
+
+```powershell
+docker compose config --quiet
+docker compose up --build -d
+docker compose exec api python -m support_ai.policies ingest /app/demo/demo_policies.pdf
+```
+
+The last command makes a paid OpenAI embedding request. The image includes only
+the reproducible fictional PDF; private PDFs are never copied into it.
+
+Open [containerized support app](http://127.0.0.1:18501) or
+[containerized API docs](http://127.0.0.1:18000/docs). These separate ports avoid
+conflicting with the native app. Override `DOCKER_UI_PORT` and `DOCKER_API_PORT`
+in `.env` if necessary.
+
+Compose seeds an empty database before starting the API and waits for API health
+before starting Streamlit. A named volume preserves SQLite and Chroma data across
+container recreation; native `data/` is separate and is not mounted. Seeding skips
+populated databases. Stop the stack while retaining that volume with:
+
+```powershell
+docker compose down
+```
+
+Do not add `--volumes` unless you intend to delete the container's saved data.
+Inspect operational status with `docker compose ps` and logs with
+`docker compose logs --tail 50 api`. Avoid sharing `docker compose config` output
+without `--quiet`: expanded environment values can include your key.
+
+Offline container tests (no key needed):
+
+```powershell
+docker build --target test -t support-tests .
+docker run --rm support-tests
+```
+
+**Verification limit:** Compose syntax was validated here. The installed Docker
+engine did not respond, so neither these container commands nor Linux runtime
+behavior are claimed as tested.
 
 ## Data and lookups
 
