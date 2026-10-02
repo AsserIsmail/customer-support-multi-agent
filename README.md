@@ -3,6 +3,9 @@
 A customer support assistant combining SQLite customer records with company policy
 PDFs. Built incrementally for a technical hiring assessment.
 
+# Video Demo
+https://drive.google.com/file/d/1nyhptz4e2ERIvjOXr5eyZKM0FoNNDflS/view?usp=drive_link
+
 ## Implementation status
 
 **Locally runnable support application.** Configuration, reproducible fictional
