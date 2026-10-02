@@ -5,10 +5,11 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-**Phases 1 through 3: database, PDF retrieval, and MCP.** Configuration, reproducible fictional
+**Phases 1 through 4: data, MCP, and conversational agents.** Configuration, reproducible fictional
 data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
-Chroma search, an official SDK MCP server/client, and automated tests are implemented. LangGraph, FastAPI,
-Streamlit, and Docker are planned in later phases; there is no chat/upload UI yet.
+Chroma search, an official SDK MCP server/client, a LangGraph assistant, and automated
+tests are implemented. A terminal chat is available. FastAPI, Streamlit, and Docker
+are planned in later phases; there is no web chat/upload UI yet.
 The ingestion service accepts PDF bytes for the future upload endpoint.
 
 ## Planned architecture
@@ -24,11 +25,10 @@ Streamlit -> FastAPI -> LangGraph supervisor
 PDF upload -> PyMuPDF -> page-aware chunks -> OpenAI embeddings -> Chroma
 ```
 
-Agents will use MCP tools exclusively for customer and policy retrieval. The SQL
-specialist will call constrained lookup tools rather than execute generated SQL.
-The supervisor will route to either specialist or both, with conversation state
-supporting follow-up questions. The supervisor and agents are not yet implemented;
-the MCP boundary and data services are implemented and independently testable.
+Agents use MCP tools exclusively for customer and policy retrieval. The SQL
+specialist calls constrained lookup tools rather than executing generated SQL.
+The supervisor routes to either specialist or both, with conversation state
+supporting follow-up questions. The graph and data services are independently testable.
 
 ## Local setup (PowerShell)
 
@@ -61,6 +61,8 @@ Commands assume the repository root is the current directory.
 | `SUPPORT_LOG_LEVEL` | `INFO` | DEBUG, INFO, WARNING, ERROR, or CRITICAL |
 | `OPENAI_API_KEY` | Unset | Required for live policy ingestion and nonempty-index search |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `OPENAI_CHAT_MODEL` | `gpt-4.1-mini` | Model for routing, specialists, and synthesis |
+| `AGENT_TIMEOUT_SECONDS` | `60` | Timeout per model request, 5..180 seconds; one retry |
 | `CHROMA_PATH` | `data/chroma` | Local persistent vector store |
 | `CHROMA_COLLECTION` | `company_policies` | Index name; change for a fresh policy set |
 | `POLICY_CHUNK_SIZE` | `1200` | Maximum characters per chunk (100..4000) |
@@ -132,9 +134,13 @@ src/support_ai/policies.py   PDF chunks, OpenAI embeddings, Chroma ingestion/sea
 src/support_ai/demo_pdfs.py  Reproducible fictional policy PDF generator
 src/support_ai/mcp_server.py Restricted MCP tools over stdio
 src/support_ai/mcp_client.py MCP-only client and diagnostic CLI
+src/support_ai/agent_models.py Typed model decisions and role prompts
+src/support_ai/agents.py     LangGraph supervisor, specialists, and conversation state
+src/support_ai/chat.py       Terminal chat and scripted conversation CLI
 tests/test_database.py      Data integrity and lookup tests
 tests/test_policies.py      PDF, embedding adapter, persistence, and search tests
 tests/test_mcp.py           Real subprocess MCP integration tests
+tests/test_agents.py        Graph routing, evidence, follow-ups, and failure tests
 .env.example               Configuration names; no credentials
 ```
 
@@ -233,8 +239,7 @@ implementations. The local process can access synthetic records for every custom
 this is not per-user authorization. Do not expose it as a public service without
 adding authentication and customer access controls.
 
-Future agents should use this client boundary; it imports no database or policy
-implementation:
+The agents use this client boundary; it imports no database or policy implementation:
 
 ```python
 from support_ai.mcp_client import connect_support_tools
@@ -251,7 +256,84 @@ SQL tools do not need a policy index or OpenAI key.
 
 SDK reference: [official MCP Python SDK](https://py.sdk.modelcontextprotocol.io/).
 
-## Validation and upcoming demo
+## Conversational assistant (Phase 4)
+
+After seeding records, ingesting the policy PDF, and setting `OPENAI_API_KEY`, start:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.chat
+```
+
+Type `/new` to clear the current conversation or `/quit` to exit. For a repeatable
+conversation, use multiple `--question` flags in the same invocation:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.chat --question "Show Emma's open tickets." --question "I mean Emma Wilson." --question "What was her latest order?" --question "Can she return that order under the policy?"
+```
+
+Each scripted response includes `status`, `answer`, `sources`, `route`, and `trace`.
+The trace lists the graph nodes that ran, making routing reviewable. The terminal
+interface prints the answer. This sends questions and relevant synthetic records
+and policy passages to OpenAI for inference. A SQL turn normally makes three model
+calls; a combined turn makes four, plus a query-embedding request.
+
+### Graph behavior
+
+```text
+START -> supervisor -> SQL specialist -> synthesis -> END
+                    -> RAG specialist -> synthesis -> END
+                    -> SQL specialist -> RAG specialist -> synthesis -> END
+```
+
+Clarification or a retrieval failure ends the turn early. Each path also runs a
+small finish node to record conversation history.
+
+- **Supervisor:** uses a structured model decision to choose SQL, RAG, both,
+  clarification, or an out-of-scope reply. It rewrites follow-ups into standalone
+  requests and separates a new topic from an unfinished prior request.
+- **SQL specialist:** plans a customer lookup and the required histories. Python
+  executes only the named MCP lookup tools. Multiple customer matches produce a
+  deterministic clarification listing actual matches. A new customer replaces the
+  previously selected customer. Optional order/ticket status filters are applied
+  to retrieved records.
+- **RAG specialist:** produces a focused policy query and calls `policy_search`
+  through MCP. No matching policy evidence prevents a policy conclusion.
+- **Synthesis:** receives fresh evidence from this turn, then returns typed answer
+  blocks with evidence IDs. Unknown IDs or missing references are rejected. Policy
+  citations are rendered by Python from retrieved metadata, rather than invented
+  by the model. Combined answers must reference both SQL and policy evidence.
+- **Conversation state:** LangGraph's in-memory checkpointer separates threads.
+  The prompt sees at most six recent turns plus the selected customer and pending
+  request. `/new` deletes that thread's checkpoints. State is lost on process exit;
+  durable history and user authentication are not implemented. Requests for the
+  same thread cannot run concurrently.
+
+### Limits and error handling
+
+The graph has no autonomous tool loop. SQL retrieval is bounded to four pages of
+50 records per requested history, and up to 50 matching records are sent to
+synthesis. Evidence marks incomplete retrieval and omitted records. Policy search
+returns at most five passages. Questions are capped at 4,000 characters. Model
+requests have a configurable timeout and one retry. Errors are returned as an
+explicit `error` status without raw provider details or stale answers.
+
+Prompts treat documents and tickets as untrusted data and require clarification
+for missing facts. In particular, order dates do not establish delivery dates, so
+the demo cannot confirm return eligibility merely from a shipped order.
+
+Citation validation verifies reference provenance; it does not prove every
+generated claim is supported. Routing and synthesis remain model-driven and can
+make mistakes. Use the recorded trace and returned sources to assess answers.
+If an answer fails evidence validation, the application returns an error instead
+of displaying the unverified draft. This is a local assessment demo, not an
+automated refund or customer account management system.
+
+References: [LangGraph graph API](https://docs.langchain.com/oss/python/langgraph/graph-api),
+[LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence),
+[LangChain OpenAI integration](https://docs.langchain.com/oss/python/integrations/chat/openai), and
+[OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
+
+## Validation and demo questions
 
 Tests cover deterministic seeds, preservation of existing data, Emma ambiguity,
 missing information, literal search inputs, ID/pagination validation, read-only
@@ -270,7 +352,14 @@ policy citations with real Chroma storage. The test policy server injects fixed
 vectors; production exposes no fake-embedding mode. A separate live MCP search
 checks the OpenAI integration using the configured local key.
 
-Example questions for the **future** chat interface:
+Agent tests use the real compiled LangGraph with scripted model decisions. They
+cover routing, fresh evidence per turn, ambiguity, follow-ups, thread isolation,
+history clearing, bounded pagination, status filtering, source validation, and
+model/tool failures. One test runs the graph against a real MCP subprocess with
+seeded SQLite records. These deterministic tests verify orchestration; live model
+checks separately assess interpretation and generated answers.
+
+Example questions for the terminal chat (web interface arrives in Phase 5):
 
 - "Show Emma's support tickets." (Should clarify which Emma.)
 - "I mean Emma Wilson. What was her latest order?"
