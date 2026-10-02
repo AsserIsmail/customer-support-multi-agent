@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "customer-support-multi-agent"
+version = "0.1.0"
+description = "Customer support assistant backed by customer records and policy documents"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "streamlit>=1.45,<2",
+    "httpx>=0.28,<1",
+    "uvicorn>=0.31,<1",
+    "python-multipart>=0.0.9,<1",
+    "langgraph>=1,<2",
+    "langchain-openai>=1,<2",
+    "mcp>=2.2,<3",
+    "chromadb>=1.0,<2",
+    "openai>=2,<3",
+    "PyMuPDF>=1.26,<2",
+    "python-dotenv>=1,<2",
+    "reportlab>=4,<5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9"]
+
+[project.scripts]
+support-seed = "support_ai.seed:main"
+support-policies = "support_ai.policies:main"
+support-demo-pdfs = "support_ai.demo_pdfs:main"
+support-mcp = "support_ai.mcp_server:main"
+support-mcp-check = "support_ai.mcp_client:main"
+support-chat = "support_ai.chat:main"
+support-api = "support_ai.api:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

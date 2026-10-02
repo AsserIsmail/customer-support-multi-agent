@@ -1,0 +1,19 @@
+# Allowlist: credentials, local databases, logs, uploads, and virtualenvs never enter the build context.
+**
+!Dockerfile
+!pyproject.toml
+!requirements-lock.txt
+!README.md
+!streamlit_app.py
+!src/
+!src/**
+!tests/
+!tests/**
+!.streamlit/
+!.streamlit/config.toml
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/
+**/.env
+**/.env.*
+**/secrets.toml

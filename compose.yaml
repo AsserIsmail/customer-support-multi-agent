@@ -1,0 +1,72 @@
+name: customer-support-demo
+
+x-app: &app
+  image: customer-support-demo:local
+  build:
+    context: .
+    target: runtime
+  init: true
+
+services:
+  seed:
+    <<: *app
+    command: ["python", "-m", "support_ai.seed"]
+    environment:
+      SUPPORT_DB_PATH: /app/data/support.db
+    volumes:
+      - support-data:/app/data
+    restart: "no"
+
+  api:
+    <<: *app
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      # Runtime only. Never pass keys as Docker build arguments.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4.1-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      SUPPORT_DB_PATH: /app/data/support.db
+      CHROMA_PATH: /app/data/chroma
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-company_policies}
+      POLICY_CHUNK_SIZE: ${POLICY_CHUNK_SIZE:-1200}
+      POLICY_CHUNK_OVERLAP: ${POLICY_CHUNK_OVERLAP:-200}
+      POLICY_MAX_DISTANCE: ${POLICY_MAX_DISTANCE:-0.6}
+      API_HOST: 0.0.0.0
+      API_PORT: "8000"
+      API_CHAT_TIMEOUT_SECONDS: ${API_CHAT_TIMEOUT_SECONDS:-300}
+      API_SESSION_TTL_SECONDS: ${API_SESSION_TTL_SECONDS:-3600}
+      API_MAX_SESSIONS: ${API_MAX_SESSIONS:-100}
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-60}
+      SUPPORT_LOG_LEVEL: ${SUPPORT_LOG_LEVEL:-INFO}
+    ports:
+      - "127.0.0.1:${DOCKER_API_PORT:-18000}:8000"
+    volumes:
+      - support-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+
+  ui:
+    <<: *app
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["python", "-m", "streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0"]
+    environment:
+      SUPPORT_API_URL: http://api:8000
+      API_CHAT_TIMEOUT_SECONDS: ${API_CHAT_TIMEOUT_SECONDS:-300}
+    ports:
+      - "127.0.0.1:${DOCKER_UI_PORT:-18501}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+
+volumes:
+  support-data:
