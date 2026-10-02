@@ -5,12 +5,12 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-**Phases 1 through 4: data, MCP, and conversational agents.** Configuration, reproducible fictional
+**Phases 1 through 5: locally runnable support application.** Configuration, reproducible fictional
 data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
 Chroma search, an official SDK MCP server/client, a LangGraph assistant, and automated
-tests are implemented. A terminal chat is available. FastAPI, Streamlit, and Docker
-are planned in later phases; there is no web chat/upload UI yet.
-The ingestion service accepts PDF bytes for the future upload endpoint.
+tests are implemented. FastAPI serves chat and PDF uploads; Streamlit provides the
+web interface. A terminal chat is also available. Final packaging and Docker are
+planned for Phase 6.
 
 ## Planned architecture
 
@@ -63,6 +63,12 @@ Commands assume the repository root is the current directory.
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
 | `OPENAI_CHAT_MODEL` | `gpt-4.1-mini` | Model for routing, specialists, and synthesis |
 | `AGENT_TIMEOUT_SECONDS` | `60` | Timeout per model request, 5..180 seconds; one retry |
+| `API_HOST` | `127.0.0.1` | API bind address |
+| `API_PORT` | `8000` | API port |
+| `SUPPORT_API_URL` | `http://127.0.0.1:8000` | Backend URL used by Streamlit |
+| `API_CHAT_TIMEOUT_SECONDS` | `300` | Overall chat request deadline, 1..900 seconds |
+| `API_SESSION_TTL_SECONDS` | `3600` | Idle conversation lifetime, 1..86400 seconds |
+| `API_MAX_SESSIONS` | `100` | Maximum live conversations, 1..1000 |
 | `CHROMA_PATH` | `data/chroma` | Local persistent vector store |
 | `CHROMA_COLLECTION` | `company_policies` | Index name; change for a fresh policy set |
 | `POLICY_CHUNK_SIZE` | `1200` | Maximum characters per chunk (100..4000) |
@@ -80,6 +86,93 @@ $env:SUPPORT_DB_PATH = "data/demo.db"
 # Alternatively, supply an explicit path:
 .\.venv\Scripts\python.exe -m support_ai.seed --db data/another-demo.db
 ```
+
+## Run the web application
+
+From the repository root, seed the demo database and generate its fictional PDF:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.seed
+.\.venv\Scripts\python.exe -m support_ai.demo_pdfs
+```
+
+Ensure your local `.env` contains `OPENAI_API_KEY`. Start two terminals:
+
+**Terminal 1 - API**
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.api
+```
+
+**Terminal 2 - Streamlit**
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
+```
+
+Open [the support app](http://127.0.0.1:8501). Select the generated
+`output/pdf/demo_policies.pdf` in the sidebar and click **Add policy**. If it was
+already ingested, the app reports that it is indexed. Then try:
+
+1. "Show Emma's open support tickets."
+2. "I mean Emma Wilson."
+3. "What was her latest order?"
+4. "Can she return that order under the refund policy?"
+5. "What is the standard shipping policy?"
+
+**New conversation** clears the current backend conversation and the displayed
+messages. Policy documents remain shared across conversations. Each browser
+connection keeps its own conversation credentials in Streamlit session state;
+the UI never asks for or displays your OpenAI key. Refreshing the browser may
+start a new session. Use Ctrl+C in each terminal to stop the servers.
+
+### API endpoints
+
+Interactive endpoint documentation is at [API docs](http://127.0.0.1:8000/docs).
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Liveness and configuration-presence checks; no paid model request |
+| `POST /sessions` | Create a random session ID and bearer token |
+| `POST /chat` | JSON with `session_id` and `message`; returns answer, sources, status, route, trace |
+| `POST /policies?session_id=...` | Multipart `file` PDF upload |
+| `DELETE /sessions/{session_id}` | Clear the session and its graph checkpoints |
+
+Chat, upload, and delete require `Authorization: Bearer <session token>`. The token
+comes from `/sessions`, not OpenAI. Tokens are returned only when creating a
+session, never in chat responses. Another session's token cannot read or clear
+your conversation. These temporary conversation credentials do **not** authenticate
+a real user or restrict access to particular customer records.
+
+Chat outcomes (`answered`, `needs_clarification`, `insufficient_evidence`, `error`)
+are represented in the JSON result. Request failures use HTTP codes: 400 for
+invalid PDFs or rejected ingestion, 401 for expired/invalid conversation
+credentials, 409 for a busy conversation or upload, 413 for oversized bodies,
+422 for invalid inputs, 503 for missing chat setup or session capacity, 504 for
+chat timeouts, and 502 for unexpected service failures. Error responses avoid
+echoing request contents or raw provider exceptions.
+
+### Local service behavior
+
+- Use **one API worker**. It owns one MCP subprocess, in-memory conversation state,
+  and a lock serializing policy ingestion. Multiple workers would split session
+  state and would not share the upload lock.
+- Idle sessions expire after one hour by default. Expired checkpoints are removed
+  lazily on the next session operation. Busy sessions are not expired mid-request.
+  An API restart clears all sessions; the UI then prompts for a new conversation.
+- PDF files are processed through the existing ingestion service. Original upload
+  files are not retained; extracted passages and embeddings persist in Chroma.
+  Filenames are metadata, never destination paths. Upload limits are enforced in
+  Streamlit and the API, including actual bytes for chunked requests.
+- The API starts without an OpenAI key so `/health` and setup diagnostics remain
+  available. Chat and new embeddings still require a valid key and API credits.
+  A healthy endpoint does not prove provider access or document retrieval quality.
+- Both services bind to loopback by default. This is a local synthetic-data demo;
+  account authentication, per-customer authorization, durable sessions, and
+  deployment hardening are not included. Do not expose the ports publicly.
+- API access logging is disabled by the launcher to avoid logging conversation
+  identifiers from upload URLs. Operational logs contain failure classes and
+  routing decisions, not keys or full request bodies.
 
 ## Data and lookups
 
@@ -120,7 +213,7 @@ Lookup behavior:
 - Foreign keys prevent orphaned records and tickets linked to another customer's
   order. Customer records and search terms are not written to application logs.
 
-The repository is an internal data layer for the future MCP server, not a network
+The repository is the internal data layer used by the MCP server, not a network
 authorization boundary. Authentication and access control must be considered
 before exposing real customer records outside a local demo.
 
@@ -137,10 +230,17 @@ src/support_ai/mcp_client.py MCP-only client and diagnostic CLI
 src/support_ai/agent_models.py Typed model decisions and role prompts
 src/support_ai/agents.py     LangGraph supervisor, specialists, and conversation state
 src/support_ai/chat.py       Terminal chat and scripted conversation CLI
+src/support_ai/api.py        FastAPI endpoints, sessions, and input limits
+src/support_ai/web_runtime.py Lifespan-owned MCP/agent resources and ingestion
+src/support_ai/web_client.py Streamlit HTTP client
+streamlit_app.py             Web chat and policy uploads
+.streamlit/config.toml       Local binding, theme, and upload limit
 tests/test_database.py      Data integrity and lookup tests
 tests/test_policies.py      PDF, embedding adapter, persistence, and search tests
 tests/test_mcp.py           Real subprocess MCP integration tests
 tests/test_agents.py        Graph routing, evidence, follow-ups, and failure tests
+tests/test_api.py           HTTP contracts, sessions, uploads, and full retrieval path
+tests/test_frontend.py      Streamlit AppTest chat and error tests
 .env.example               Configuration names; no credentials
 ```
 
@@ -159,7 +259,8 @@ Ingestion and search send document chunks or query text to OpenAI's embedding AP
 and incur API usage. PDF creation and extraction are local. Search returns JSON
 passages with text, filename, one-based page number, chunk/document IDs, embedding
 model, cosine distance, and a citation such as `[demo_policies.pdf, p. 1]`.
-This phase returns evidence passages; answer synthesis arrives with LangGraph.
+The ingestion/search CLI returns evidence passages; the chat application uses
+LangGraph to synthesize answers from those passages.
 
 ### Ingestion decisions and limits
 
@@ -359,7 +460,7 @@ model/tool failures. One test runs the graph against a real MCP subprocess with
 seeded SQLite records. These deterministic tests verify orchestration; live model
 checks separately assess interpretation and generated answers.
 
-Example questions for the terminal chat (web interface arrives in Phase 5):
+Example questions for the terminal or web chat:
 
 - "Show Emma's support tickets." (Should clarify which Emma.)
 - "I mean Emma Wilson. What was her latest order?"

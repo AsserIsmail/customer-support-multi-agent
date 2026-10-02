@@ -21,3 +21,4 @@ logs/
 .idea/
 output/
 tmp/
+.streamlit/secrets.toml
