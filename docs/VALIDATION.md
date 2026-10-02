@@ -23,6 +23,8 @@ that has not yet executed in its target environment.
 | Installed-wheel smoke | Outside the source checkout: database seed, real MCP customer/order calls, graph import, and API lifespan/health/session creation passed |
 | Repository scan | No OpenAI-style key strings, `.env`, or database files found in tracked/unignored source files |
 | Compose configuration | `docker compose config --quiet` succeeded without displaying expanded secrets |
+| Hosted CI | [Run 37070250184](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/37070250184): Windows and Ubuntu tests, Docker build, and container tests passed for `ec2a323` |
+| Final local repeat | 105 tests passed in 59.71 seconds; live five-question demo confirmed ambiguity, follow-ups, combined retrieval, and cited shipping policy |
 
 The repository scan is a targeted check, not a general secret-detection guarantee.
 The local `.env`, databases, vector store, generated PDFs, logs, and virtualenvs
@@ -45,14 +47,9 @@ they cannot establish that every possible answer is factually correct.
 
 ## Not verified here
 
-- **Container build and startup:** Docker CLI and Compose are installed. Docker
-  Desktop was started, but the engine remained unresponsive to a bounded readiness
-  check. No successful image build, container test run, or Compose startup is claimed.
-- **Linux execution:** the dependency list has a Windows-only marker for `pywin32`;
-  Linux may resolve additional platform dependencies. Linux behavior is pending CI
-  or a working Docker engine.
-- **Hosted GitHub Actions:** a Windows/Linux test matrix and container test job are
-  configured. Hosted CI results have not yet been verified.
+- **Local Compose startup:** Docker CLI and Compose are installed. Docker
+  Desktop was restarted, but the local engine remained unresponsive. Hosted
+  container build/tests passed; the full Compose service startup remains unverified.
 - **Production deployment:** no load test, public deployment, customer identity
   provider, per-record authorization, or durable conversation service is included.
 
