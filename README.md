@@ -5,10 +5,11 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-**Phase 1: database foundation.** Configuration, reproducible fictional data,
-restricted read-only lookups, and database tests are implemented. MCP, document
-ingestion, LangGraph, FastAPI, Streamlit, and Docker are planned in later phases;
-there is no chat interface yet.
+**Phases 1 and 2: database and PDF retrieval.** Configuration, reproducible fictional
+data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
+Chroma search, and automated tests are implemented. MCP, LangGraph, FastAPI,
+Streamlit, and Docker are planned in later phases; there is no chat/upload UI yet.
+The ingestion service accepts PDF bytes for the future upload endpoint.
 
 ## Planned architecture
 
@@ -30,14 +31,22 @@ supporting follow-up questions. These components are not yet implemented.
 
 ## Local setup (PowerShell)
 
-Python 3.10 or newer is required. Phase 1 has no runtime dependencies outside the
-Python standard library. Use an isolated virtual environment:
+Python 3.10 or newer is required; development was tested on Windows with Python
+3.13.3. Use an isolated virtual environment:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m support_ai.seed
 .\.venv\Scripts\python.exe -m pytest -q
+```
+
+`requirements-lock.txt` records the tested Windows/Python 3.13 dependency versions.
+For the same environment, install it before the editable package:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
 ```
 
 On macOS/Linux, use `.venv/bin/python` instead of the Windows interpreter path.
@@ -49,11 +58,18 @@ Commands assume the repository root is the current directory.
 | --- | --- | --- |
 | `SUPPORT_DB_PATH` | `data/support.db` | SQLite path, relative to the working directory |
 | `SUPPORT_LOG_LEVEL` | `INFO` | DEBUG, INFO, WARNING, ERROR, or CRITICAL |
-| `OPENAI_API_KEY` | Unset | Reserved for the embedding and inference phases |
+| `OPENAI_API_KEY` | Unset | Required for live policy ingestion and nonempty-index search |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `CHROMA_PATH` | `data/chroma` | Local persistent vector store |
+| `CHROMA_COLLECTION` | `company_policies` | Index name; change for a fresh policy set |
+| `POLICY_CHUNK_SIZE` | `1200` | Maximum characters per chunk (100..4000) |
+| `POLICY_CHUNK_OVERLAP` | `200` | Overlapping characters, smaller than chunk size |
+| `POLICY_MAX_DISTANCE` | `0.6` | Maximum cosine distance accepted by search (0..2) |
 
-Phase 1 reads process environment variables directly; it does **not** automatically
-load `.env`. `.env.example` documents the names for future application setup.
-No API key is required now. To choose a different database:
+Configuration loads `.env` from the current working directory. Process environment
+variables take precedence. Copy `.env.example` to `.env` if it does not already
+exist, then edit the copy locally. Keep the API key out of chat, source code, and
+Git. The seed command and automated tests need no key. To choose a different database:
 
 ```powershell
 $env:SUPPORT_DB_PATH = "data/demo.db"
@@ -111,16 +127,72 @@ before exposing real customer records outside a local demo.
 src/support_ai/config.py     Environment configuration and logging
 src/support_ai/database.py   Schema, connection handling, restricted lookups
 src/support_ai/seed.py       Reproducible seed CLI
+src/support_ai/policies.py   PDF chunks, OpenAI embeddings, Chroma ingestion/search CLI
+src/support_ai/demo_pdfs.py  Reproducible fictional policy PDF generator
 tests/test_database.py      Data integrity and lookup tests
+tests/test_policies.py      PDF, embedding adapter, persistence, and search tests
 .env.example               Configuration names; no credentials
 ```
+
+## Policy ingestion and search demo
+
+Generate the fictional three-page policy PDF, set your key in `.env`, then run:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.demo_pdfs
+.\.venv\Scripts\python.exe -m support_ai.policies ingest output/pdf/demo_policies.pdf
+.\.venv\Scripts\python.exe -m support_ai.policies search "How long do I have to request a refund?"
+.\.venv\Scripts\python.exe -m support_ai.policies search "When should a delayed shipment be investigated?"
+```
+
+Ingestion and search send document chunks or query text to OpenAI's embedding API
+and incur API usage. PDF creation and extraction are local. Search returns JSON
+passages with text, filename, one-based page number, chunk/document IDs, embedding
+model, cosine distance, and a citation such as `[demo_policies.pdf, p. 1]`.
+This phase returns evidence passages; answer synthesis arrives with LangGraph.
+
+### Ingestion decisions and limits
+
+- PyMuPDF extracts and normalizes text separately for each page. Chunks overlap
+  within a page and never cross a page boundary, so citations remain precise.
+- PDFs are limited to 20 MiB, 200 pages, 100,000 extracted characters per page,
+  and 1,000 chunks. Malformed, locked, empty, scanned, or partly textless PDFs
+  are rejected with a clear message. OCR is not included. Complex multi-column
+  layouts may need preprocessing; extracted reading order is not guaranteed.
+- SHA-256 of the PDF bytes identifies the document. Repeat uploads, including
+  renamed copies, return `duplicate` and preserve the original source filename
+  without another embedding request. Visually identical PDFs with different bytes
+  are different documents.
+- A changed document with an existing filename is rejected. To revise a policy
+  set, choose a new collection and ingest the intended set there. Do not mix
+  obsolete and current versions by renaming them into the same collection.
+- Model and chunk settings are stored in collection metadata. Changes require a
+  new collection to prevent mixing incompatible embeddings or chunk layouts.
+- All embeddings are obtained before the single bounded Chroma upsert. Stable
+  chunk IDs make retries idempotent. A provider failure leaves existing records
+  unchanged. This is a local, single-writer demo; concurrent uploads/replacements
+  are not supported yet. Chroma write failures are reported and may need a retry.
+- Search uses cosine distance and a configurable cutoff. Empty results mean no
+  evidence passed the cutoff, not proof that the company has no relevant policy.
+  The default cutoff is a starting value, not a calibrated confidence score.
+- SDK retries are limited to two, with a 30-second request timeout. Operational
+  logs report failure classes rather than provider error bodies or document text.
+
+Implementation references: [OpenAI embeddings](https://developers.openai.com/api/docs/guides/embeddings),
+[Chroma persistent client](https://docs.trychroma.com/reference/python/client), and
+[PyMuPDF text extraction](https://pymupdf.readthedocs.io/en/latest/recipes-text.html).
 
 ## Validation and upcoming demo
 
 Tests cover deterministic seeds, preservation of existing data, Emma ambiguity,
 missing information, literal search inputs, ID/pagination validation, read-only
 enforcement, foreign keys, and configuration. Tests create isolated temporary
-databases and do not require network access or an OpenAI key.
+databases and do not require network access or an OpenAI key. Policy tests use
+real PDF extraction and Chroma storage with deterministic test vectors. They
+exercise page citations, duplicate handling, persistence across processes,
+provider failures, index compatibility, and upload limits. Mocked OpenAI adapter
+tests verify batching and error handling, not live semantic quality. Run the
+ingest/search commands above for a live check after configuring the key.
 
 Example questions for the **future** chat interface:
 
