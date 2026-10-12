@@ -5,7 +5,7 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-### Oracle upgrade: phase 1
+### Oracle upgrade: phases 1 and 2
 
 Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
 and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
@@ -34,8 +34,8 @@ transactions. Dates return as ISO calendar dates and monetary amounts remain
 integer cents. Driver errors do not expose connection details. The call timeout
 limits a database round trip, not the total duration of a multi-call request.
 
-Oracle provisioning, grants, Docker wiring, and migration are phase 2 work and are
-not included yet. The existing Compose stack remains the SQLite demo. The seed CLI
+Oracle provisioning, grants, Docker wiring, and migration are available on
+`phase/oracle-02-migration` (see below). The base Compose stack remains the SQLite demo. The seed CLI
 is SQLite-only and rejects an implicit SQLite target when Oracle is selected; an
 explicit `--db` can still create a SQLite migration source. No existing data is moved
 by selecting a backend.
@@ -49,6 +49,91 @@ Phase 1 tests use a mocked Oracle driver to verify bindings, serialization,
 pagination, cleanup, configuration, and sanitized failures, alongside the existing
 SQLite/MCP/application regressions. A live Oracle database has not been verified.
 New modules: `repositories.py` (protocol/factory) and `oracle_database.py` (adapter).
+
+### Oracle provisioning and migration (phase 2)
+
+The Oracle overlay uses `gvenzl/oracle-free:23.26.3-slim` with a persistent named
+volume and the image's health check. See the [image documentation](https://github.com/gvenzl/oci-oracle-free)
+for container requirements. Keep the SQLite source application stopped during
+migration. For a source using SQLite WAL, checkpoint it before mounting the database
+file alone; a WAL file can contain committed records absent from the main file.
+
+Set three **different**, local passwords in `.env`:
+`SUPPORT_ORACLE_ADMIN_PASSWORD`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
+`SUPPORT_ORACLE_PASSWORD` (the runtime reader). Owner/reader setup passwords must
+be 12..30 characters without double quotes or line breaks. Use
+`SUPPORT_SQLITE_MIGRATION_SOURCE` to select the existing SQLite file (default
+`./data/support.db`). The bind mount is read-only and refuses a nonexistent source.
+Do not paste expanded Compose configuration or credentials into logs or chat.
+
+From PowerShell, provision a fresh Oracle volume once:
+
+```powershell
+docker compose -f compose.yaml -f compose.oracle.yaml config --quiet
+docker compose -f compose.yaml -f compose.oracle.yaml up -d oracle
+docker compose -f compose.yaml -f compose.oracle.yaml run --build --rm oracle-setup
+docker compose -f compose.yaml -f compose.oracle.yaml up --build -d api ui
+```
+
+The final command runs the `seed` service as a **migration**, waits for successful
+completion, then starts the API with `SUPPORT_READER`. The UI is unchanged.
+The API receives only reader credentials; the migration service receives the owner
+password, and the one-time setup service receives the admin/owner/reader passwords.
+Chroma stays in the existing support-data volume, separate from oracle-data.
+
+Setup creates `SUPPORT_OWNER` with session/table creation privileges and a bounded
+tablespace quota, and `SUPPORT_READER` with CREATE SESSION plus SELECT on the three
+support tables. Setup refuses to change existing accounts. Oracle DDL commits
+implicitly: a failed setup may leave partial objects requiring operator inspection;
+the command deliberately never drops, resets, or replaces accounts. Changing `.env`
+passwords does not rotate passwords already stored in an existing database volume.
+
+For a native application connecting to this container, configure
+`SUPPORT_DB_BACKEND=oracle`, `SUPPORT_ORACLE_USER=SUPPORT_READER`,
+`SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER`, and
+`SUPPORT_ORACLE_DSN=localhost:1521/FREEPDB1`. Compose sets its internal DSN itself.
+The equivalent native setup/migration commands are:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.oracle_setup
+.\.venv\Scripts\python.exe -m support_ai.oracle_migrate --source data/support.db
+```
+
+Migration reads a consistent SQLite snapshot, checks integrity, locks the three
+Oracle target tables, and copies customers, orders, then tickets using bound values.
+It verifies all columns of every row before a single commit. IDs, integer cents,
+ISO dates, nullable ticket order IDs, unique constraints, and the composite
+ticket/order foreign key are preserved. An identical target reports `unchanged`;
+any populated but different target is rejected without overwrite. Copy/verification
+failures roll back the transaction. Empty strings, invalid dates, and incompatible
+source values are rejected rather than silently altered. This in-memory migration
+is intended for the small synthetic demo, not a large production database.
+
+To stop services while retaining data:
+
+```powershell
+docker compose -f compose.yaml -f compose.oracle.yaml down
+```
+
+Do not add `--volumes` unless deleting the saved databases is intentional.
+
+Offline tests run normally. To run the four live integration tests, use a
+**dedicated test PDB** already provisioned by the setup command. It must be empty
+or contain exactly the unchanged synthetic seed; tests refuse conflicting data.
+Export `SUPPORT_ORACLE_DSN`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
+`SUPPORT_ORACLE_PASSWORD` into the test process environment, then:
+
+```powershell
+$env:SUPPORT_ORACLE_TESTS = "1"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_oracle_integration.py
+Remove-Item Env:SUPPORT_ORACLE_TESTS
+```
+
+The live suite checks exact migration/rerun behavior, Oracle lookup serialization,
+MCP invocation, composite foreign keys, and database-enforced reader restrictions.
+It leaves synthetic records in that test PDB. CI provisions an isolated Oracle
+service for this suite. Local Docker engine availability and hosted CI results
+must be checked separately; offline tests do not establish live Oracle correctness.
 
 ### Existing application
 

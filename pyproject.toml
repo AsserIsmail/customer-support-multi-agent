@@ -36,6 +36,11 @@ support-mcp = "support_ai.mcp_server:main"
 support-mcp-check = "support_ai.mcp_client:main"
 support-chat = "support_ai.chat:main"
 support-api = "support_ai.api:main"
+support-oracle-setup = "support_ai.oracle_setup:main"
+support-oracle-migrate = "support_ai.oracle_migrate:main"
+
+[tool.setuptools.package-data]
+support_ai = ["sql/*.sql"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

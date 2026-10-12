@@ -1,0 +1,62 @@
+# Overlay: docker compose -f compose.yaml -f compose.oracle.yaml ...
+services:
+  oracle:
+    image: gvenzl/oracle-free:23.26.3-slim
+    environment:
+      ORACLE_PASSWORD: ${SUPPORT_ORACLE_ADMIN_PASSWORD:?Set SUPPORT_ORACLE_ADMIN_PASSWORD}
+    ports:
+      - "127.0.0.1:${DOCKER_ORACLE_PORT:-1521}:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  oracle-setup:
+    image: customer-support-demo:local
+    build:
+      context: .
+      target: runtime
+    profiles: ["setup"]
+    command: ["python", "-m", "support_ai.oracle_setup"]
+    depends_on:
+      oracle:
+        condition: service_healthy
+    environment:
+      SUPPORT_ORACLE_DSN: oracle:1521/FREEPDB1
+      SUPPORT_ORACLE_ADMIN_PASSWORD: ${SUPPORT_ORACLE_ADMIN_PASSWORD:?Set SUPPORT_ORACLE_ADMIN_PASSWORD}
+      SUPPORT_ORACLE_OWNER_PASSWORD: ${SUPPORT_ORACLE_OWNER_PASSWORD:?Set SUPPORT_ORACLE_OWNER_PASSWORD}
+      SUPPORT_ORACLE_PASSWORD: ${SUPPORT_ORACLE_PASSWORD:?Set SUPPORT_ORACLE_PASSWORD}
+    restart: "no"
+
+  seed:
+    command: ["python", "-m", "support_ai.oracle_migrate", "--source", "/migration/source.db"]
+    depends_on:
+      oracle:
+        condition: service_healthy
+    environment:
+      SUPPORT_ORACLE_DSN: oracle:1521/FREEPDB1
+      SUPPORT_ORACLE_OWNER_PASSWORD: ${SUPPORT_ORACLE_OWNER_PASSWORD:?Set SUPPORT_ORACLE_OWNER_PASSWORD}
+    volumes:
+      - type: bind
+        source: ${SUPPORT_SQLITE_MIGRATION_SOURCE:-./data/support.db}
+        target: /migration/source.db
+        read_only: true
+        bind:
+          create_host_path: false
+
+  api:
+    environment:
+      SUPPORT_DB_BACKEND: oracle
+      SUPPORT_ORACLE_USER: SUPPORT_READER
+      SUPPORT_ORACLE_PASSWORD: ${SUPPORT_ORACLE_PASSWORD:?Set SUPPORT_ORACLE_PASSWORD}
+      SUPPORT_ORACLE_DSN: oracle:1521/FREEPDB1
+      SUPPORT_ORACLE_SCHEMA: SUPPORT_OWNER
+      SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS: ${SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS:-5}
+      SUPPORT_ORACLE_CALL_TIMEOUT_MS: ${SUPPORT_ORACLE_CALL_TIMEOUT_MS:-5000}
+
+volumes:
+  oracle-data:

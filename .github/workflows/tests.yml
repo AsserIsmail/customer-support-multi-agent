@@ -32,3 +32,37 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build --target test -t support-tests .
       - run: docker run --rm support-tests
+
+  oracle-integration:
+    runs-on: ubuntu-latest
+    # These credentials belong only to this disposable CI service database.
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23.26.3-slim
+        env:
+          ORACLE_PASSWORD: CI_admin_only_2026
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+          --health-start-period 60s
+    env:
+      SUPPORT_ORACLE_TESTS: "1"
+      SUPPORT_ORACLE_DSN: localhost:1521/FREEPDB1
+      SUPPORT_ORACLE_ADMIN_PASSWORD: CI_admin_only_2026
+      SUPPORT_ORACLE_OWNER_PASSWORD: CI_owner_only_2026
+      SUPPORT_ORACLE_PASSWORD: CI_reader_only_2026
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+      - run: python -m pip install -r requirements-lock.txt
+      - run: python -m pip install --no-deps -e .
+      - run: python -m support_ai.oracle_setup
+      - run: python -m pytest -q tests/test_oracle_integration.py
