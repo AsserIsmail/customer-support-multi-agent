@@ -209,6 +209,13 @@ named test table to verify discovery after grants, column DDL, refresh, and gran
 revocation; it never alters the three customer-data tables for this test. Run the
 same `tests/test_oracle_integration.py` command described above on a dedicated PDB.
 
+Phase 3 validation: 177 local tests passed with five live tests skipped. All five
+live Oracle tests passed in the [phase 3 CI run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38300972259),
+including discovery over MCP, composite relationships, newly granted tables,
+column changes, and grant revocation. Compose configuration and dependency checks
+also passed. Local Oracle startup remains unverified because the Docker engine
+was unavailable.
+
 Dictionary references: [ALL_TAB_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/ALL_TAB_COLUMNS.html),
 [ALL_CONS_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/ALL_CONS_COLUMNS.html),
 and [ALL_IND_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/refrn/ALL_IND_COLUMNS.html).
