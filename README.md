@@ -47,7 +47,7 @@ file. It does not connect to Oracle or attest to credentials, grants, or readine
 
 Phase 1 tests use a mocked Oracle driver to verify bindings, serialization,
 pagination, cleanup, configuration, and sanitized failures, alongside the existing
-SQLite/MCP/application regressions. A live Oracle database has not been verified.
+SQLite/MCP/application regressions. Phase 2 adds live Oracle verification in CI.
 New modules: `repositories.py` (protocol/factory) and `oracle_database.py` (adapter).
 
 ### Oracle provisioning and migration (phase 2)
@@ -132,8 +132,11 @@ Remove-Item Env:SUPPORT_ORACLE_TESTS
 The live suite checks exact migration/rerun behavior, Oracle lookup serialization,
 MCP invocation, composite foreign keys, and database-enforced reader restrictions.
 It leaves synthetic records in that test PDB. CI provisions an isolated Oracle
-service for this suite. Local Docker engine availability and hosted CI results
-must be checked separately; offline tests do not establish live Oracle correctness.
+service for this suite. All four live Oracle integration tests passed in the
+[phase 2 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38299246543).
+Local verification passed 148 tests with the four live tests skipped, validated the
+Compose overlay, and built the wheel with its schema resource. The local Docker
+engine was unavailable, so a local Compose application startup remains unverified.
 
 ### Existing application
 
