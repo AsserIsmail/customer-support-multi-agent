@@ -2,8 +2,9 @@
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 from dotenv import load_dotenv
 
@@ -12,6 +13,8 @@ from dotenv import load_dotenv
 class Settings:
     db_path: Path
     log_level: str = "INFO"
+    db_backend: str = "sqlite"
+    oracle: "OracleSettings | None" = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -22,7 +25,43 @@ class Settings:
         level = os.getenv("SUPPORT_LOG_LEVEL", "INFO").upper()
         if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             raise ValueError("SUPPORT_LOG_LEVEL must be a standard logging level")
-        return cls(Path(raw_path).expanduser().resolve(), level)
+        backend = os.getenv("SUPPORT_DB_BACKEND", "sqlite").strip().lower()
+        if backend not in {"sqlite", "oracle"}:
+            raise ValueError("SUPPORT_DB_BACKEND must be sqlite or oracle")
+        return cls(Path(raw_path).expanduser().resolve(), level, backend,
+                   OracleSettings.from_env() if backend == "oracle" else None)
+
+
+@dataclass(frozen=True)
+class OracleSettings:
+    # Exclude connection details from representations and incidental logging.
+    user: str = field(repr=False)
+    password: str = field(repr=False)
+    dsn: str = field(repr=False)
+    schema: str
+    connect_timeout_seconds: int = 5
+    call_timeout_ms: int = 5000
+
+    def __post_init__(self):
+        if not all(isinstance(v, str) and v.strip() for v in (self.user, self.password, self.dsn)):
+            raise ValueError("Set SUPPORT_ORACLE_USER, SUPPORT_ORACLE_PASSWORD, and SUPPORT_ORACLE_DSN")
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", self.schema):
+            raise ValueError("SUPPORT_ORACLE_SCHEMA must be a simple unquoted Oracle identifier")
+        if not 1 <= self.connect_timeout_seconds <= 60 or not 1 <= self.call_timeout_ms <= 120000:
+            raise ValueError("Oracle connection timeout must be 1..60 seconds and call timeout 1..120000 ms")
+
+    @classmethod
+    def from_env(cls) -> "OracleSettings":
+        try:
+            connect_timeout = int(os.getenv("SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS", "5"))
+            call_timeout = int(os.getenv("SUPPORT_ORACLE_CALL_TIMEOUT_MS", "5000"))
+        except ValueError:
+            raise ValueError("Oracle timeout settings must be integers") from None
+        return cls(os.getenv("SUPPORT_ORACLE_USER", "").strip(),
+                   os.getenv("SUPPORT_ORACLE_PASSWORD", ""),
+                   os.getenv("SUPPORT_ORACLE_DSN", "").strip(),
+                   os.getenv("SUPPORT_ORACLE_SCHEMA", "SUPPORT_OWNER").strip().upper(),
+                   connect_timeout, call_timeout)
 
 
 def configure_logging(level: str) -> None:

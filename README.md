@@ -5,6 +5,53 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
+### Oracle upgrade: phase 1
+
+Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
+and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
+Each application run uses one customer database; there is no replication or automatic
+fallback. Chroma remains the separate policy store. The existing SQL agent still
+uses fixed lookups in this phase. Schema discovery, validated generated SQL, and
+mandatory discovery in the actual SQL-agent workflow are planned for later phases.
+
+For a separately provisioned Oracle database with compatible customer tables, set:
+
+```dotenv
+SUPPORT_DB_BACKEND=oracle
+SUPPORT_ORACLE_USER=support_reader
+SUPPORT_ORACLE_PASSWORD=<set locally>
+SUPPORT_ORACLE_DSN=localhost:1521/FREEPDB1
+SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER
+SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS=5
+SUPPORT_ORACLE_CALL_TIMEOUT_MS=5000
+```
+
+The schema name accepts only a simple unquoted identifier. Use a dedicated reader
+with SELECT grants on the owner's customers, orders, and tickets tables; do not
+configure owner/admin credentials in the runtime. Connections open lazily for each
+lookup using python-oracledb's default Thin mode, bound values, and read-only
+transactions. Dates return as ISO calendar dates and monetary amounts remain
+integer cents. Driver errors do not expose connection details. The call timeout
+limits a database round trip, not the total duration of a multi-call request.
+
+Oracle provisioning, grants, Docker wiring, and migration are phase 2 work and are
+not included yet. The existing Compose stack remains the SQLite demo. The seed CLI
+is SQLite-only and rejects an implicit SQLite target when Oracle is selected; an
+explicit `--db` can still create a SQLite migration source. No existing data is moved
+by selecting a backend.
+
+`/health` remains a liveness/configuration endpoint. It includes
+`customer_database_backend` and `customer_database_configured`; in Oracle mode,
+`customer_database_present` is null (unverified), rather than checking a SQLite
+file. It does not connect to Oracle or attest to credentials, grants, or readiness.
+
+Phase 1 tests use a mocked Oracle driver to verify bindings, serialization,
+pagination, cleanup, configuration, and sanitized failures, alongside the existing
+SQLite/MCP/application regressions. A live Oracle database has not been verified.
+New modules: `repositories.py` (protocol/factory) and `oracle_database.py` (adapter).
+
+### Existing application
+
 **Locally runnable support application.** Configuration, reproducible fictional
 data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
 Chroma search, an official SDK MCP server/client, a LangGraph assistant, and automated

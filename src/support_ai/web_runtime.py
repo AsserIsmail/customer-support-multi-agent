@@ -34,7 +34,10 @@ class Runtime:
         return await anyio.to_thread.run_sync(ingest)
 
     def health(self) -> dict:
-        return {"status": "ok", "customer_database_present": Settings.from_env().db_path.is_file(),
+        settings = Settings.from_env()
+        return {"status": "ok", "customer_database_backend": settings.db_backend,
+                "customer_database_present": settings.db_path.is_file() if settings.db_backend == "sqlite" else None,
+                "customer_database_configured": settings.db_backend == "sqlite" or settings.oracle is not None,
                 "policy_index_present": (PolicySettings.from_env().chroma_path / "chroma.sqlite3").is_file(),
                 "openai_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip())}
 

@@ -64,6 +64,7 @@ numpy==2.5.3
 oauthlib==4.0.0
 onnxruntime==1.30.0
 openai==2.54.0
+oracledb==26.0.1
 opentelemetry-api==1.45.0
 opentelemetry-exporter-otlp-common==0.66b0
 opentelemetry-exporter-otlp-proto-common==1.45.0

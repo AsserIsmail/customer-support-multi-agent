@@ -9,7 +9,8 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field
 
 from support_ai.config import Settings, PolicySettings, configure_logging
-from support_ai.database import CustomerRepository, DataAccessError
+from support_ai.database import DataAccessError
+from support_ai.repositories import create_repository
 from support_ai.policies import PolicyIndex, PolicyError
 
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ def _result(operation: Callable[[], dict]) -> CallToolResult:
 def create_server(settings: Settings | None = None,
                   policy_factory: Callable[[], PolicyIndex] | None = None) -> MCPServer:
     settings = settings or Settings.from_env()
-    repository = CustomerRepository(settings.db_path)
+    repository = create_repository(settings)
     # Policy storage and OpenAI are not initialized until a policy tool is called.
     policy_factory = policy_factory or (lambda: PolicyIndex(PolicySettings.from_env(), create=False))
     server = MCPServer("customer-support", version="0.1.0", instructions=(
