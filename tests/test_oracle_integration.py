@@ -50,7 +50,9 @@ def test_live_reader_cannot_write_or_create(migrated):
                         "CREATE TABLE forbidden_probe (id NUMBER)"):
                 with pytest.raises(oracledb.DatabaseError) as error:
                     cursor.execute(sql)
-                assert error.value.args[0].code == 1031
+                # Oracle 26ai reports missing object privileges as ORA-41900;
+                # ORA-01031 remains the general insufficient-privileges error.
+                assert error.value.args[0].code in {1031, 41900}
             conn.rollback()
 
 
