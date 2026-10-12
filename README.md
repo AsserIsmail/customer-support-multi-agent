@@ -5,14 +5,16 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-### Oracle upgrade: phases 1 and 2
+### Oracle upgrade: phases 1–3
 
 Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
 and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
 Each application run uses one customer database; there is no replication or automatic
 fallback. Chroma remains the separate policy store. The existing SQL agent still
-uses fixed lookups in this phase. Schema discovery, validated generated SQL, and
-mandatory discovery in the actual SQL-agent workflow are planned for later phases.
+uses fixed lookups through phase 3. Schema discovery tools are now implemented;
+validated generated SQL (phase 4) and mandatory discovery in the actual SQL-agent
+workflow (phase 5) are still pending. Tool registration alone does not complete
+that agent integration.
 
 For a separately provisioned Oracle database with compatible customer tables, set:
 
@@ -117,7 +119,7 @@ docker compose -f compose.yaml -f compose.oracle.yaml down
 
 Do not add `--volumes` unless deleting the saved databases is intentional.
 
-Offline tests run normally. To run the four live integration tests, use a
+Offline tests run normally. To run the live integration tests, use a
 **dedicated test PDB** already provisioned by the setup command. It must be empty
 or contain exactly the unchanged synthetic seed; tests refuse conflicting data.
 Export `SUPPORT_ORACLE_DSN`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
@@ -137,6 +139,79 @@ service for this suite. All four live Oracle integration tests passed in the
 Local verification passed 148 tests with the four live tests skipped, validated the
 Compose overlay, and built the wheel with its schema resource. The local Docker
 engine was unavailable, so a local Compose application startup remains unverified.
+
+### Oracle schema discovery (phase 3)
+
+Branch `phase/oracle-03-schema` adds five Oracle-only MCP tools. SQLite keeps its
+existing five customer/policy tools. The new tools use the same runtime reader
+account and do not require owner credentials, catalog-wide grants, embeddings,
+or another database. They read Oracle `ALL_*` dictionary views, never customer rows.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_tables` | None | Accessible allowlisted tables, comments, and column counts |
+| `describe_table` | `table` | Columns/types/nullability, constraints, ordered index columns, outbound foreign keys |
+| `get_relationships` | Optional `table` | Inbound and outbound foreign keys, with ordered source/target column pairs |
+| `search_schema` | `query`, optional `limit` (1..50) | Ranked keyword matches in table/column names, types, and comments |
+| `refresh_schema_index` | None | Reloaded metadata version, refresh timestamp, and table count |
+
+Set `SUPPORT_ORACLE_ALLOWED_TABLES=CUSTOMERS,ORDERS,TICKETS` and
+`SUPPORT_ORACLE_SCHEMA_CACHE_TTL_SECONDS=300` (defaults shown). The table list
+accepts 1..50 distinct simple unquoted identifiers, normalized to uppercase; TTL
+accepts 1..3600 seconds. Only accessible tables in the configured
+`SUPPORT_ORACLE_SCHEMA` that also appear in this list are exposed. Both ends of a
+relationship must be in that catalog, so cross-schema or unauthorized targets
+are not disclosed. Qualified names, database links, quoted table names, and
+unauthorized table arguments are rejected. Column names retain Oracle's spelling.
+This allowlist governs discovery; existing fixed customer lookup contracts are
+unchanged. It is not a substitute for database grants or customer authorization.
+
+The process-local cache loads on the first schema call and refreshes on the next
+call after its TTL. An explicit refresh rebuilds it immediately. Updates are
+atomic, concurrent first reads share one load, and a failed refresh invalidates
+the old snapshot and returns a sanitized MCP error. Each result includes
+`schema_version` (a content hash), `refreshed_at` (UTC), and `cache_ttl_seconds`.
+Unchanged metadata retains its version across refreshes. Cached metadata can lag
+DDL or permission changes until refresh/expiry; it must not authorize SQL execution.
+
+Search uses a small in-memory inverted index with case-insensitive word matching,
+underscore splitting, and simple plural matching. It is keyword search, not
+semantic search: `amount cents`, `order`, or a known column/comment keyword are
+good inputs. Results include scores, total match count, and a truncation flag.
+Empty search results are distinct from connection or discovery failures.
+Dictionary reads are bounded to 20,000 rows per metadata query; oversized catalogs
+fail instead of silently returning incomplete metadata. Oracle's
+`SEARCH_CONDITION_VC` may truncate long check expressions; results flag conditions
+that reach its 4000-byte limit. Index expression text is not reconstructed.
+
+Composite relationships are returned as a single foreign key containing ordered
+`column_pairs`. In particular, tickets `(ORDER_ID, CUSTOMER_ID)` refers to orders
+`(ID, CUSTOMER_ID)`; a future SQL planner must use both pairs for that relationship.
+Constraint status and validation state are included. Metadata comments and check
+expressions are untrusted data, not instructions to the model.
+
+`refresh_schema_index` changes only the in-memory cache. Its MCP annotation marks
+that state change; it does not execute DDL or modify customer/policy records.
+The catalog is available through the existing client boundary, for example:
+
+```python
+async with connect_support_tools() as tools:
+    tables = await tools.call("list_tables", {})
+    columns = await tools.call("describe_table", {"table": "orders"})
+    joins = await tools.call("get_relationships", {"table": "orders"})
+    matches = await tools.call("search_schema", {"query": "amount cents"})
+```
+
+Tests cover dictionary joins, composite ordering, authorization scope, caching,
+concurrency, version changes, error redaction, and invocation over real MCP stdio.
+The opt-in Oracle integration suite additionally creates and removes one uniquely
+named test table to verify discovery after grants, column DDL, refresh, and grant
+revocation; it never alters the three customer-data tables for this test. Run the
+same `tests/test_oracle_integration.py` command described above on a dedicated PDB.
+
+Dictionary references: [ALL_TAB_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/ALL_TAB_COLUMNS.html),
+[ALL_CONS_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/ALL_CONS_COLUMNS.html),
+and [ALL_IND_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/refrn/ALL_IND_COLUMNS.html).
 
 ### Existing application
 

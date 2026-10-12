@@ -165,3 +165,55 @@ def test_unexpected_tool_error_does_not_leak_secrets(caplog):
     result = _result(failure)
     assert result.is_error
     assert "private-api-key-or-document" not in result.model_dump_json() + caplog.text
+
+
+def test_schema_tools_over_stdio_with_injected_metadata(tmp_path):
+    launcher = tmp_path / "schema_server.py"
+    launcher.write_text('''
+from pathlib import Path
+from support_ai.config import Settings, OracleSettings
+from support_ai.mcp_server import create_server
+from support_ai.schema_catalog import SchemaCatalog
+settings = OracleSettings("reader", "unused-password", "unused-host/service", "SUPPORT_OWNER")
+calls = 0
+def load():
+    global calls
+    calls += 1
+    if calls >= 3:
+        raise RuntimeError("private-driver-error")
+    return {"ORDERS": {"owner": "SUPPORT_OWNER", "table": "ORDERS", "comments": "Purchase history",
+        "columns": [{"column_name": "ID", "data_type": "NUMBER", "comments": None}],
+        "constraints": [], "indexes": [], "relationships": []}}
+catalog = SchemaCatalog(settings, loader=load)
+create_server(Settings(Path("unused.db"), db_backend="oracle", oracle=settings),
+              schema_factory=lambda: catalog).run()
+''', encoding="utf-8")
+
+    async def run():
+        parameters = StdioServerParameters(command=sys.executable, args=[str(launcher)], cwd=str(tmp_path), env=dict(os.environ))
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write, read_timeout_seconds=20) as session:
+                await session.initialize()
+                tools = SupportTools(session)
+                discovered = {tool.name: tool for tool in await tools.list_tools()}
+                schema_tools = {"list_tables", "describe_table", "get_relationships", "search_schema", "refresh_schema_index"}
+                assert set(discovered) == TOOLS | schema_tools
+                assert discovered["refresh_schema_index"].annotations.read_only_hint is False
+                assert all(discovered[name].annotations.read_only_hint is True for name in schema_tools - {"refresh_schema_index"})
+                listing = await tools.call("list_tables", {})
+                assert listing["tables"][0]["table"] == "ORDERS"
+                assert (await tools.call("describe_table", {"table": "orders"}))["table"]["columns"][0]["column_name"] == "ID"
+                assert (await tools.call("get_relationships", {}))["relationships"] == []
+                assert (await tools.call("search_schema", {"query": "purchase"}))["matches"][0]["kind"] == "table"
+                assert (await tools.call("refresh_schema_index", {}))["schema_version"] == listing["schema_version"]
+                for name, args in [("describe_table", {"table": "SYS.USERS"}),
+                                   ("get_relationships", {"table": "SECRETS"}),
+                                   ("search_schema", {"query": "id", "limit": True}),
+                                   ("search_schema", {"query": " "})]:
+                    assert (await session.call_tool(name, args)).is_error
+                for name in ("refresh_schema_index", "list_tables"):
+                    result = await session.call_tool(name, {})
+                    assert result.is_error
+                    assert "private-driver-error" not in result.model_dump_json()
+                    assert result.structured_content["status"] == "error"
+    asyncio.run(run())

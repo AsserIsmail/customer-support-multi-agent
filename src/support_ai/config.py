@@ -41,6 +41,8 @@ class OracleSettings:
     schema: str
     connect_timeout_seconds: int = 5
     call_timeout_ms: int = 5000
+    allowed_tables: tuple[str, ...] = ("CUSTOMERS", "ORDERS", "TICKETS")
+    schema_cache_ttl_seconds: int = 300
 
     def __post_init__(self):
         if not all(isinstance(v, str) and v.strip() for v in (self.user, self.password, self.dsn)):
@@ -49,19 +51,28 @@ class OracleSettings:
             raise ValueError("SUPPORT_ORACLE_SCHEMA must be a simple unquoted Oracle identifier")
         if not 1 <= self.connect_timeout_seconds <= 60 or not 1 <= self.call_timeout_ms <= 120000:
             raise ValueError("Oracle connection timeout must be 1..60 seconds and call timeout 1..120000 ms")
+        if (not isinstance(self.allowed_tables, tuple) or not 1 <= len(self.allowed_tables) <= 50
+                or any(not isinstance(name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", name)
+                       for name in self.allowed_tables) or len(set(self.allowed_tables)) != len(self.allowed_tables)):
+            raise ValueError("Oracle allowed tables must be 1..50 distinct uppercase unquoted identifiers")
+        if type(self.schema_cache_ttl_seconds) is not int or not 1 <= self.schema_cache_ttl_seconds <= 3600:
+            raise ValueError("Oracle schema cache TTL must be 1..3600 seconds")
 
     @classmethod
     def from_env(cls) -> "OracleSettings":
         try:
             connect_timeout = int(os.getenv("SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS", "5"))
             call_timeout = int(os.getenv("SUPPORT_ORACLE_CALL_TIMEOUT_MS", "5000"))
+            schema_ttl = int(os.getenv("SUPPORT_ORACLE_SCHEMA_CACHE_TTL_SECONDS", "300"))
         except ValueError:
             raise ValueError("Oracle timeout settings must be integers") from None
         return cls(os.getenv("SUPPORT_ORACLE_USER", "").strip(),
                    os.getenv("SUPPORT_ORACLE_PASSWORD", ""),
                    os.getenv("SUPPORT_ORACLE_DSN", "").strip(),
                    os.getenv("SUPPORT_ORACLE_SCHEMA", "SUPPORT_OWNER").strip().upper(),
-                   connect_timeout, call_timeout)
+                   connect_timeout, call_timeout,
+                   tuple(name.strip().upper() for name in os.getenv(
+                       "SUPPORT_ORACLE_ALLOWED_TABLES", "CUSTOMERS,ORDERS,TICKETS").split(",")), schema_ttl)
 
 
 def configure_logging(level: str) -> None:

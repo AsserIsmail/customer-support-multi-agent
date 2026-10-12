@@ -6,6 +6,7 @@ No setup, reset, or destructive cleanup is performed by this suite.
 
 import asyncio
 import os
+from uuid import uuid4
 
 import oracledb
 import pytest
@@ -80,4 +81,61 @@ def test_live_mcp_oracle_path(migrated, tmp_path):
             assert (await tools.call("customer_lookup", {"query": "Emma"}))["status"] == "ambiguous"
             page = await tools.call("order_lookup", {"customer_id": 1, "limit": 1})
             assert page["orders"][0]["id"] == 103 and page["next_offset"] == 1
+            discovered = {tool.name for tool in await tools.list_tools()}
+            assert {"list_tables", "describe_table", "get_relationships", "search_schema", "refresh_schema_index"} <= discovered
+            listing = await tools.call("list_tables", {})
+            assert {item["table"] for item in listing["tables"]} == {"CUSTOMERS", "ORDERS", "TICKETS"}
+            description = await tools.call("describe_table", {"table": "orders"})
+            assert description["schema_version"] == listing["schema_version"]
+            columns = {col["column_name"]: col for col in description["table"]["columns"]}
+            assert columns["AMOUNT_CENTS"]["data_type"] == "NUMBER"
+            assert columns["AMOUNT_CENTS"]["nullable"] is False
+            assert any(index["index_name"] == "ORDERS_CUSTOMER" for index in description["table"]["indexes"])
+            assert any(c["constraint_type"] == "P" for c in description["table"]["constraints"])
+            relations = await tools.call("get_relationships", {"table": "orders"})
+            composite = next(rel for rel in relations["relationships"] if rel["constraint_name"] == "TICKETS_ORDER_OWNER")
+            assert [(pair["column"], pair["referenced_column"]) for pair in composite["column_pairs"]] == [
+                ("ORDER_ID", "ID"), ("CUSTOMER_ID", "CUSTOMER_ID")]
+            assert (await tools.call("search_schema", {"query": "amount cents"}))["matches"][0]["column"] == "AMOUNT_CENTS"
+            assert (await tools.call("refresh_schema_index", {}))["schema_version"] == listing["schema_version"]
     asyncio.run(run())
+
+
+def test_live_schema_refresh_tracks_ddl_and_grants(migrated, tmp_path):
+    # Only this uniquely named disposable table is changed or dropped, never demo records.
+    table = "SCHEMA_PROBE_" + uuid4().hex[:12].upper()
+    env = dict(os.environ, SUPPORT_DB_BACKEND="oracle", SUPPORT_ORACLE_USER=migrated.user,
+               SUPPORT_ORACLE_PASSWORD=migrated.password, SUPPORT_ORACLE_DSN=migrated.dsn,
+               SUPPORT_ORACLE_SCHEMA=migrated.schema,
+               SUPPORT_ORACLE_ALLOWED_TABLES=f"CUSTOMERS,ORDERS,TICKETS,{table}")
+    env.pop("SUPPORT_ORACLE_OWNER_PASSWORD", None)
+    env.pop("SUPPORT_ORACLE_ADMIN_PASSWORD", None)
+    with oracledb.connect(user="SUPPORT_OWNER", password=LIVE["SUPPORT_ORACLE_OWNER_PASSWORD"], dsn=migrated.dsn) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(f"CREATE TABLE {table} (id NUMBER PRIMARY KEY)")
+            try:
+                async def run():
+                    async with connect_support_tools(cwd=tmp_path, env=env) as tools:
+                        assert (await tools.call("describe_table", {"table": table}))["status"] == "not_found"
+                        cursor.execute(f"GRANT SELECT ON {table} TO SUPPORT_READER")
+                        initial = await tools.call("refresh_schema_index", {})
+                        assert (await tools.call("describe_table", {"table": table}))["status"] == "found"
+                        cursor.execute(f"ALTER TABLE {table} ADD tracking_reference VARCHAR2(100)")
+                        assert (await tools.call("search_schema", {"query": "tracking_reference"}))["status"] == "no_matches"
+                        refreshed = await tools.call("refresh_schema_index", {})
+                        assert refreshed["schema_version"] != initial["schema_version"]
+                        matches = (await tools.call("search_schema", {"query": "tracking_reference"}))["matches"]
+                        assert matches[0]["table"] == table and matches[0]["column"] == "TRACKING_REFERENCE"
+                        # The database grant alone does not authorize metadata exposure.
+                        from dataclasses import replace
+                        from support_ai.schema_catalog import SchemaCatalog
+                        limited = SchemaCatalog(replace(migrated, allowed_tables=("ORDERS",)))
+                        assert [item["table"] for item in limited.list_tables()["tables"]] == ["ORDERS"]
+                        assert limited.get_relationships()["relationships"] == []
+                        cursor.execute(f"REVOKE SELECT ON {table} FROM SUPPORT_READER")
+                        await tools.call("refresh_schema_index", {})
+                        assert (await tools.call("describe_table", {"table": table}))["status"] == "not_found"
+                        assert (await tools.call("search_schema", {"query": "tracking_reference"}))["status"] == "no_matches"
+                asyncio.run(run())
+            finally:
+                cursor.execute(f"DROP TABLE {table} PURGE")
