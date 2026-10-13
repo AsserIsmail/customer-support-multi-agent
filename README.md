@@ -391,6 +391,12 @@ Oracle integration tests. Model decisions and embeddings are deterministic test
 implementations; production code has no fake-model mode. These checks establish
 component integration and recovery, not natural-language model quality.
 
+Phase 6 validation: 283 local tests passed with nine Oracle-dependent cases skipped.
+Linux, Windows, and container CI checks passed. The integration job passed all ten
+tests: eight Oracle integration tests plus this combined scenario on both backends.
+See the [phase 6 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38368764665).
+A paid live-model evaluation was not run as part of this automated verification.
+
 For a live model demonstration, complete the Oracle setup and policy ingestion
 instructions above, configure your API key locally, and run the existing chat CLI:
 
