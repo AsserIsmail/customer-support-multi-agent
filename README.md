@@ -356,6 +356,14 @@ Generated SQL can still be semantically wrong; tests with scripted model decisio
 verify orchestration and live execution, not the accuracy of a paid model on every
 natural-language question. Live model evaluation remains a separate demo check.
 
+Phase 5 validation: CI passed on Linux, Windows, and in the container. The general
+suite has 282 passing tests and eight opt-in live tests; all eight live Oracle tests
+passed in the dedicated integration job. The new graph test builds its JOIN from
+discovered composite foreign-key pairs and verifies the rows reaching synthesis.
+Unit tests cover repair limits, schema-version changes, missing metadata, ambiguity,
+combined SQL/RAG routing, query-evidence requirements, and truncation notices.
+See the [phase 5 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38367655691).
+
 ### Existing application
 
 **Locally runnable support application.** Configuration, reproducible fictional
@@ -788,8 +796,9 @@ conversation, use multiple `--question` flags in the same invocation:
 Each scripted response includes `status`, `answer`, `sources`, `route`, and `trace`.
 The trace lists the graph nodes that ran, making routing reviewable. The terminal
 interface prints the answer. This sends questions and relevant synthetic records
-and policy passages to OpenAI for inference. A SQL turn normally makes three model
-calls; a combined turn makes four, plus a query-embedding request.
+and policy passages to OpenAI for inference. With SQLite, a SQL turn normally makes three model
+calls; a combined turn makes four, plus a query-embedding request. Oracle adds one
+SQL-generation call and, only after a recoverable query failure, one repair call.
 
 ### Graph behavior
 
@@ -805,11 +814,11 @@ small finish node to record conversation history.
 - **Supervisor:** uses a structured model decision to choose SQL, RAG, both,
   clarification, or an out-of-scope reply. It rewrites follow-ups into standalone
   requests and separates a new topic from an unfinished prior request.
-- **SQL specialist:** plans a customer lookup and the required histories. Python
-  executes only the named MCP lookup tools. Multiple customer matches produce a
-  deterministic clarification listing actual matches. A new customer replaces the
-  previously selected customer. Optional order/ticket status filters are applied
-  to retrieved records.
+- **SQL specialist:** resolves the customer through MCP lookup tools. Multiple
+  matches produce a deterministic clarification listing actual matches. A new
+  customer replaces the previously selected customer. SQLite uses fixed history
+  lookups and Python status filters. Oracle discovers schema and relationships,
+  generates a bound SELECT, and calls the validated MCP executor.
 - **RAG specialist:** produces a focused policy query and calls `policy_search`
   through MCP. No matching policy evidence prevents a policy conclusion.
 - **Synthesis:** receives fresh evidence from this turn, then returns typed answer
@@ -824,9 +833,10 @@ small finish node to record conversation history.
 
 ### Limits and error handling
 
-The graph has no autonomous tool loop. SQL retrieval is bounded to four pages of
+The graph has no autonomous tool loop. SQLite retrieval is bounded to four pages of
 50 records per requested history, and up to 50 matching records are sent to
-synthesis. Evidence marks incomplete retrieval and omitted records. Policy search
+synthesis. Oracle allows two planning attempts and at most 100 result rows, with
+additional query time, column, cell, and payload limits described above. Evidence marks incomplete retrieval and omitted records. Policy search
 returns at most five passages. Questions are capped at 4,000 characters. Model
 requests have a configurable timeout and one retry. Errors are returned as an
 explicit `error` status without raw provider details or stale answers.
