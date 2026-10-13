@@ -197,7 +197,7 @@ def test_live_query_deadline_cancels_and_next_query_succeeds(migrated):
             await service.execute("SELECT SUM(MOD(a.id*b.id*c.id*d.id*e.id*f.id,97)) FROM orders a "
                                   "JOIN orders b ON 1=1 JOIN orders c ON 1=1 JOIN orders d ON 1=1 "
                                   "JOIN orders e ON 1=1 JOIN orders f ON 1=1")
-        assert error.value.code == "timeout"
+        assert error.value.code == "timeout", repr(error.value.__context__)
         assert monotonic() - started < 15
         result = await service.execute("SELECT id FROM orders ORDER BY id", row_limit=1)
         assert result["rows"] == [[101]]

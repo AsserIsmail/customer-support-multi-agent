@@ -61,15 +61,9 @@ class ReadonlyQueryService:
                         tcp_connect_timeout=self.settings.connect_timeout_seconds,
                     ) as conn:
                         conn.call_timeout = min(self.settings.call_timeout_ms, self.settings.query_timeout_seconds * 1000)
-                        try:
-                            result = await self._run(conn, query, row_limit)
-                        except asyncio.CancelledError:
-                            # Request a server-side break before context-manager cleanup.
-                            try:
-                                conn.cancel()
-                            except oracledb.Error:
-                                pass
-                            raise
+                        # The async driver sends a break and resets its protocol on
+                        # cancellation. A second cancel would interrupt cleanup.
+                        result = await self._run(conn, query, row_limit)
             result["query_id"] = query_id
             logger.info("SQL execution id=%s outcome=success rows=%d elapsed_ms=%d",
                         query_id, len(result["rows"]), (monotonic() - started) * 1000)
