@@ -202,3 +202,44 @@ def test_live_query_deadline_cancels_and_next_query_succeeds(migrated):
         result = await service.execute("SELECT id FROM orders ORDER BY id", row_limit=1)
         assert result["rows"] == [[101]]
     asyncio.run(run())
+
+
+def test_live_graph_uses_discovered_relationships_and_executes_join(migrated, tmp_path):
+    from support_ai.agent_models import OracleQueryPlan, QueryBind
+    from support_ai.agents import SupportAssistant
+    from test_agents import ScriptedModel, route, sql, draft
+
+    class SchemaGroundedModel(ScriptedModel):
+        async def decide(self, role, schema, payload):
+            if role == "oracle_sql":
+                discovered = payload["schema"]
+                tables = {item["table"]: item for item in discovered["tables"]}
+                assert "STATUS" in {c["column_name"] for c in tables["ORDERS"]["columns"]}
+                relation = next(r for r in discovered["relationships"]
+                                if r["constraint_name"] == "TICKETS_ORDER_OWNER")
+                assert len(relation["column_pairs"]) == 2
+                on = " AND ".join(f"t.{p['column']} = o.{p['referenced_column']}"
+                                  for p in relation["column_pairs"])
+                return OracleQueryPlan(
+                    sql=f"SELECT o.id AS order_id, t.id AS ticket_id FROM {relation['table']} t "
+                        f"JOIN {relation['referenced_table']} o ON {on} "
+                        "WHERE o.customer_id = :customer_id ORDER BY o.id",
+                    parameters=[QueryBind(name="customer_id", value=payload["selected_customer"]["id"])],
+                    row_limit=50, clarification="")
+            if role == "synthesis":
+                result = payload["evidence"]["query"]["data"]
+                assert result["rows"] == [[101, 101], [102, 102], [103, 103]]
+                assert result["truncated"] is False
+                assert result["schema_version"]
+            return await super().decide(role, schema, payload)
+
+    env = dict(os.environ, SUPPORT_DB_BACKEND="oracle", SUPPORT_ORACLE_USER=migrated.user,
+               SUPPORT_ORACLE_PASSWORD=migrated.password, SUPPORT_ORACLE_DSN=migrated.dsn,
+               SUPPORT_ORACLE_SCHEMA=migrated.schema)
+    async def run():
+        async with connect_support_tools(cwd=tmp_path, env=env) as tools:
+            model = SchemaGroundedModel(route("sql"), sql(orders=True, tickets=True), draft(ids=["query"]))
+            result = await SupportAssistant(tools, model).ask("Show Emma Wilson's orders and tickets", thread_id="oracle")
+            assert result["status"] == "answered"
+            assert result["trace"] == ["supervisor", "sql", "synthesis"]
+    asyncio.run(run())

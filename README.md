@@ -10,11 +10,10 @@ PDFs. Built incrementally for a technical hiring assessment.
 Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
 and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
 Each application run uses one customer database; there is no replication or automatic
-fallback. Chroma remains the separate policy store. The existing SQL agent still
-uses fixed lookups through phase 4. Schema discovery and validated read-only query
-execution are implemented. Mandatory discovery and generated SQL in the actual
-SQL-agent workflow (phase 5) are still pending. Tool registration alone does not
-complete that agent integration.
+fallback. Chroma remains the separate policy store. In Oracle mode, the SQL agent
+now discovers schema metadata before generating SQL and executes it through the
+validated MCP query tool. SQLite retains the fixed lookup workflow. Customer
+identity resolution remains shared between both backends.
 
 For a separately provisioned Oracle database with compatible customer tables, set:
 
@@ -298,11 +297,64 @@ live Oracle tests passed in CI, including query cancellation at the deadline and
 a successful subsequent query. Linux, Windows, and container checks also passed
 ([validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38365594245)).
 The async driver handles the server-side break; the service does not send a
-second cancellation signal during connection cleanup. Phase 5 will wire schema
-discovery and this executor into the actual SQL agent's planning workflow.
+second cancellation signal during connection cleanup. Phase 5 connects discovery and this executor to the SQL agent (below).
 
 References: [SQLGlot scope analysis](https://github.com/tobymao/sqlglot/blob/main/sqlglot/optimizer/scope.py)
 and [python-oracledb asynchronous connections](https://python-oracledb.readthedocs.io/en/stable/user_guide/asyncio.html).
+
+### Schema-grounded SQL agent (phase 5)
+
+Branch `phase/oracle-05-agent` connects discovery to the actual LangGraph SQL node.
+After resolving a customer (including ambiguous-name clarification and follow-up
+context), the node detects the Oracle executor through MCP tool discovery. It calls
+`list_tables`, `search_schema`, `describe_table`, and `get_relationships` before
+asking the model to generate an Oracle SELECT. The planner receives actual columns,
+constraints, indexes, foreign-key column pairs, owner, and schema version.
+
+```mermaid
+flowchart LR
+    User --> Supervisor
+    Supervisor --> SQL[SQL agent: resolve customer]
+    SQL --> Discovery[MCP schema discovery]
+    Discovery --> Planner[Generate Oracle SELECT using metadata]
+    Planner --> Executor[MCP validated read-only executor]
+    Executor --> Evidence[SQL result evidence]
+    Supervisor --> RAG[Policy RAG]
+    Evidence --> RAG
+    Evidence --> Synthesis
+    RAG --> Synthesis
+    Synthesis --> Answer
+    SQL --> SQLite[SQLite fixed lookups]
+    SQLite --> Evidence
+```
+
+All database access stays behind MCP. The agent collects up to eight approved table
+descriptions (60,000 characters of metadata); schema search prioritizes them while
+retaining potential join tables. Mixed schema versions trigger a refresh. Invalid
+SQL, invalid binds, changed metadata, or unavailable approved tables get at most
+one refresh/replan attempt. Timeout and database failures stop immediately; Oracle
+errors never silently fall back to SQLite or fixed history lookups.
+
+Query results preserve columns, positional rows, query ID, schema version, and
+truncation flags in the evidence passed to RAG and synthesis. The final answer must
+reference query evidence, and the application adds a partial-results notice when
+retrieval was truncated. Existing policy citations and combined routing remain in
+place. Requests needing unavailable facts, such as a delivery date absent from the
+schema, can ask for clarification without submitting SQL.
+
+With Oracle configured and the existing chat application running, try:
+
+- "How many orders does Emma Wilson have in each status?"
+- "Show Emma Wilson's orders alongside their support tickets."
+- "Why hasn't Emma Wilson's latest order arrived, and is she eligible for a refund?"
+
+The current workflow remains customer-scoped and asks for a customer for global
+analytics. Customer selection and query filters are model guidance, **not row-level
+authorization**: this synthetic demo has no per-customer access-control boundary.
+The reader account, approved objects, and SQL validator enforce database access.
+Generated SQL can still be semantically wrong; tests with scripted model decisions
+verify orchestration and live execution, not the accuracy of a paid model on every
+natural-language question. Live model evaluation remains a separate demo check.
 
 ### Existing application
 

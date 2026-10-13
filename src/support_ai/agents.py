@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from support_ai.agent_models import DecisionModel, RoutePlan, SQLPlan, RAGPlan, AnswerDraft
 from support_ai.mcp_client import SupportTools
+from support_ai.oracle_agent import retrieve_oracle_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,16 @@ class SupportAssistant:
                 return {"selected_customer": None, "trace": trace,
                         "response": response("insufficient_evidence", "I couldn't find that customer. Please check the name, email, or ID.")}
             evidence = {"customer": {"kind": "sql", "data": selected}}
+            capabilities = {tool.name for tool in await self.tools.list_tools()}
+            if "execute_readonly_query" in capabilities:
+                result = await retrieve_oracle_evidence(self.tools, self.model, state["request"], selected)
+                if result.get("clarification"):
+                    return {"selected_customer": selected, "trace": trace,
+                            "response": response("needs_clarification", result["clarification"])}
+                evidence["query"] = {"kind": "sql", "data": result,
+                                     "complete": not result["truncated"], "omitted": 0}
+                return {"selected_customer": selected, "evidence": evidence, "trace": trace}
+
             for kind, tool, needed, status in (
                 ("orders", "order_lookup", plan.orders, plan.order_status),
                 ("tickets", "support_tickets", plan.tickets, plan.ticket_status),
@@ -203,6 +214,11 @@ class SupportAssistant:
                         sources[evidence_id] = {"chunk_id": evidence_id, "source": passage["source"],
                             "page": passage["page"], "citation": citation}
                 lines.append(block.text.strip() + (" " + " ".join(citations) if citations else ""))
+            if "query" in evidence:
+                if not any("query" in block.evidence_ids for block in draft.blocks):
+                    raise EvidenceError("Oracle answer omitted query evidence")
+                if evidence["query"]["data"]["truncated"]:
+                    lines.append("These results are partial because the query reached a retrieval limit.")
             if state["route"] in ("rag", "both") and not used_policy:
                 raise EvidenceError("Policy answer omitted source references")
             if state["route"] == "both" and not used_sql:
