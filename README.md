@@ -1,11 +1,11 @@
 # Customer Support Multi-Agent AI
 
-A customer support assistant combining SQLite customer records with company policy
+A customer support assistant combining Oracle or SQLite customer records with company policy
 PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-### Oracle upgrade: phases 1–4
+### Oracle upgrade: phases 1-6
 
 Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
 and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
@@ -185,7 +185,7 @@ that reach its 4000-byte limit. Index expression text is not reconstructed.
 
 Composite relationships are returned as a single foreign key containing ordered
 `column_pairs`. In particular, tickets `(ORDER_ID, CUSTOMER_ID)` refers to orders
-`(ID, CUSTOMER_ID)`; a future SQL planner must use both pairs for that relationship.
+`(ID, CUSTOMER_ID)`; the Oracle SQL planner receives both pairs for that relationship.
 Constraint status and validation state are included. Metadata comments and check
 expressions are untrusted data, not instructions to the model.
 
@@ -363,6 +363,47 @@ discovered composite foreign-key pairs and verifies the rows reaching synthesis.
 Unit tests cover repair limits, schema-version changes, missing metadata, ambiguity,
 combined SQL/RAG routing, query-evidence requirements, and truncation notices.
 See the [phase 5 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38367655691).
+
+### End-to-end verification (phase 6)
+
+Branch `phase/oracle-06-verification` adds a repeatable combined conversation through
+real database storage, PDF extraction, persistent Chroma, MCP stdio, and LangGraph.
+The same scenario runs against SQLite locally and Oracle in the integration job:
+
+1. Ask about Emma's return and verify clarification lists the two real matches.
+2. Select Emma Wilson and retrieve her latest order plus a refund policy passage.
+3. On Oracle, submit an unknown column, then verify one metadata refresh and SQL repair.
+4. Verify the shipped order reaches synthesis alongside the actual PDF passage,
+   and the final answer has the verified filename/page citation and asks for delivery information.
+5. Follow up about her order, then switch to a general policy question; verify fresh
+   evidence and no leftover customer records in the policy-only answer.
+6. Reject a write on Oracle and verify orders remain readable afterward.
+
+Run the local scenario without API credentials:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_end_to_end.py
+```
+
+The Oracle case uses the same opt-in `SUPPORT_ORACLE_TESTS=1` and disposable database
+configuration as the existing integration suite. CI runs both scenarios with all
+Oracle integration tests. Model decisions and embeddings are deterministic test
+implementations; production code has no fake-model mode. These checks establish
+component integration and recovery, not natural-language model quality.
+
+For a live model demonstration, complete the Oracle setup and policy ingestion
+instructions above, configure your API key locally, and run the existing chat CLI:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.chat --question "Can Emma return her latest order?" --question "I mean Emma Wilson" --question "Show her latest order" --question "What is the refund policy?"
+```
+
+This command makes paid model and embedding calls. Check that ambiguity is resolved,
+SQL evidence matches the synthetic records, policy answers cite the ingested PDF,
+and the assistant asks for missing delivery facts rather than approving a refund.
+Also try the aggregation and JOIN questions in phase 5. Record the model name,
+question, answer, trace, sources, and any incorrect SQL semantics when assessing
+quality; never treat scripted test success as a live-model evaluation result.
 
 ### Existing application
 
