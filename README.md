@@ -293,6 +293,14 @@ than SQL text, parameter values, returned records, credentials, or raw driver er
 Tests cover rejected syntax, scope resolution, bind injection, metadata checks,
 output caps, cancellation/cleanup, MCP errors, and live Oracle queries/timeouts.
 
+Phase 4 validation: 270 local tests passed with seven live tests skipped. All seven
+live Oracle tests passed in CI, including query cancellation at the deadline and
+a successful subsequent query. Linux, Windows, and container checks also passed
+([validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38365594245)).
+The async driver handles the server-side break; the service does not send a
+second cancellation signal during connection cleanup. Phase 5 will wire schema
+discovery and this executor into the actual SQL agent's planning workflow.
+
 References: [SQLGlot scope analysis](https://github.com/tobymao/sqlglot/blob/main/sqlglot/optimizer/scope.py)
 and [python-oracledb asynchronous connections](https://python-oracledb.readthedocs.io/en/stable/user_guide/asyncio.html).
 
