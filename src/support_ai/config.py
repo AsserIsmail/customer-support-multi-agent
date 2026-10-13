@@ -43,6 +43,7 @@ class OracleSettings:
     call_timeout_ms: int = 5000
     allowed_tables: tuple[str, ...] = ("CUSTOMERS", "ORDERS", "TICKETS")
     schema_cache_ttl_seconds: int = 300
+    query_timeout_seconds: int = 10
 
     def __post_init__(self):
         if not all(isinstance(v, str) and v.strip() for v in (self.user, self.password, self.dsn)):
@@ -57,6 +58,8 @@ class OracleSettings:
             raise ValueError("Oracle allowed tables must be 1..50 distinct uppercase unquoted identifiers")
         if type(self.schema_cache_ttl_seconds) is not int or not 1 <= self.schema_cache_ttl_seconds <= 3600:
             raise ValueError("Oracle schema cache TTL must be 1..3600 seconds")
+        if type(self.query_timeout_seconds) is not int or not 1 <= self.query_timeout_seconds <= 60:
+            raise ValueError("Oracle query timeout must be 1..60 seconds")
 
     @classmethod
     def from_env(cls) -> "OracleSettings":
@@ -64,6 +67,7 @@ class OracleSettings:
             connect_timeout = int(os.getenv("SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS", "5"))
             call_timeout = int(os.getenv("SUPPORT_ORACLE_CALL_TIMEOUT_MS", "5000"))
             schema_ttl = int(os.getenv("SUPPORT_ORACLE_SCHEMA_CACHE_TTL_SECONDS", "300"))
+            query_timeout = int(os.getenv("SUPPORT_ORACLE_QUERY_TIMEOUT_SECONDS", "10"))
         except ValueError:
             raise ValueError("Oracle timeout settings must be integers") from None
         return cls(os.getenv("SUPPORT_ORACLE_USER", "").strip(),
@@ -72,7 +76,7 @@ class OracleSettings:
                    os.getenv("SUPPORT_ORACLE_SCHEMA", "SUPPORT_OWNER").strip().upper(),
                    connect_timeout, call_timeout,
                    tuple(name.strip().upper() for name in os.getenv(
-                       "SUPPORT_ORACLE_ALLOWED_TABLES", "CUSTOMERS,ORDERS,TICKETS").split(",")), schema_ttl)
+                       "SUPPORT_ORACLE_ALLOWED_TABLES", "CUSTOMERS,ORDERS,TICKETS").split(",")), schema_ttl, query_timeout)
 
 
 def configure_logging(level: str) -> None:

@@ -13,6 +13,8 @@ from support_ai.database import DataAccessError
 from support_ai.repositories import create_repository
 from support_ai.policies import PolicyIndex, PolicyError
 from support_ai.schema_catalog import SchemaCatalog, SchemaError
+from support_ai.query_service import ReadonlyQueryService
+from support_ai.sql_validation import QueryError
 
 logger = logging.getLogger(__name__)
 CustomerId = Annotated[int, Field(strict=True, ge=1)]
@@ -20,6 +22,11 @@ HistoryLimit = Annotated[int, Field(strict=True, ge=1, le=100)]
 Offset = Annotated[int, Field(strict=True, ge=0)]
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
                             idempotent_hint=True, open_world_hint=False)
+
+
+def _tool_response(payload: dict, error: bool = False) -> CallToolResult:
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload))],
+                          structured_content=payload, is_error=error)
 
 
 def _result(operation: Callable[[], dict]) -> CallToolResult:
@@ -35,8 +42,7 @@ def _result(operation: Callable[[], dict]) -> CallToolResult:
         logger.error("Unexpected support tool failure (%s)", type(exc).__name__)
         payload = {"status": "error", "message": "Tool unavailable; check server configuration and logs."}
         error = True
-    return CallToolResult(content=[TextContent(type="text", text=json.dumps(payload))],
-                          structured_content=payload, is_error=error)
+    return _tool_response(payload, error)
 
 
 def create_server(settings: Settings | None = None,
@@ -105,6 +111,21 @@ def create_server(settings: Settings | None = None,
     if settings.db_backend == "oracle":
         # Construct once per server; the catalog connects lazily and shares its cache.
         catalog = schema_factory() if schema_factory else SchemaCatalog(settings.oracle)
+        query_service = ReadonlyQueryService(settings.oracle)
+
+        @server.tool(annotations=READ_ONLY)
+        async def execute_readonly_query(sql: Annotated[str, Field(min_length=1, max_length=12000)],
+                                         parameters: dict | None = None,
+                                         row_limit: Annotated[int, Field(strict=True, ge=1, le=100)] = 50) -> CallToolResult:
+            """Execute one restricted Oracle SELECT with named binds. Discover schema first. No writes or package calls.
+
+            Rows are positional arrays matching columns. Fractional NUMBER values are exact decimal strings.
+            Check truncated and truncation_reasons before drawing conclusions about completeness.
+            """
+            try:
+                return _tool_response(await query_service.execute(sql, parameters, row_limit))
+            except QueryError as exc:
+                return _tool_response({"status": "error", "code": exc.code, "message": str(exc)}, True)
 
         @server.tool(annotations=READ_ONLY)
         def list_tables() -> CallToolResult:

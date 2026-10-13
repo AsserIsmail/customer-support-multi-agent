@@ -5,16 +5,16 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-### Oracle upgrade: phases 1–3
+### Oracle upgrade: phases 1–4
 
 Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
 and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
 Each application run uses one customer database; there is no replication or automatic
 fallback. Chroma remains the separate policy store. The existing SQL agent still
-uses fixed lookups through phase 3. Schema discovery tools are now implemented;
-validated generated SQL (phase 4) and mandatory discovery in the actual SQL-agent
-workflow (phase 5) are still pending. Tool registration alone does not complete
-that agent integration.
+uses fixed lookups through phase 4. Schema discovery and validated read-only query
+execution are implemented. Mandatory discovery and generated SQL in the actual
+SQL-agent workflow (phase 5) are still pending. Tool registration alone does not
+complete that agent integration.
 
 For a separately provisioned Oracle database with compatible customer tables, set:
 
@@ -219,6 +219,82 @@ was unavailable.
 Dictionary references: [ALL_TAB_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/ALL_TAB_COLUMNS.html),
 [ALL_CONS_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/ALL_CONS_COLUMNS.html),
 and [ALL_IND_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/refrn/ALL_IND_COLUMNS.html).
+
+### Restricted Oracle SQL execution (phase 4)
+
+Branch `phase/oracle-04-query` adds the Oracle-only MCP tool
+`execute_readonly_query(sql, parameters=None, row_limit=50)`. It executes one
+supported Oracle SELECT using the existing reader account. SQLite's tool set and
+the current agent workflow remain unchanged. Example through the existing MCP client:
+
+```python
+result = await tools.call("execute_readonly_query", {
+    "sql": "SELECT o.id, o.status, t.subject FROM orders o JOIN tickets t "
+           "ON t.order_id=o.id AND t.customer_id=o.customer_id "
+           "WHERE o.customer_id=:customer_id ORDER BY o.id",
+    "parameters": {"customer_id": 1},
+    "row_limit": 10,
+})
+```
+
+The validator uses SQLGlot's Oracle dialect and an explicit allowlist of syntax
+tree nodes. It supports SELECTs, ON/USING joins, nonrecursive CTEs, subqueries,
+filters, grouping, ordering, CASE, ordinary row offsets/limits, and a small set of
+built-ins: COUNT, SUM, MIN, MAX, AVG, LOWER, UPPER, LENGTH, ABS, ROUND, COALESCE/NVL,
+and date literals. Arithmetic and string concatenation are supported. Set
+operations, window functions, recursive/hierarchical queries, casts, and other
+unlisted syntax are deliberately unsupported in this first executor.
+
+DDL, DML, PL/SQL, multiple statements, locking reads, hints, package/user-defined
+function calls, sequences, pseudocolumns, database links, and unauthorized objects
+are rejected. Bare and qualified table names are resolved against
+`SUPPORT_ORACLE_SCHEMA` and `SUPPORT_ORACLE_ALLOWED_TABLES`, then rewritten with an
+explicit quoted owner. CTE aliases are distinguished from physical tables.
+Only regenerated validated SQL is executed; comments and original unparsed text
+are never forwarded to Oracle.
+
+Before execution, the service checks accessible physical tables and columns using
+fresh `ALL_TABLES`/`ALL_TAB_COLUMNS` reads on its own connection. Every column and
+alias is resolved against those results; missing/ambiguous columns and dotted
+package-like attributes fail validation. The discovery cache cannot authorize a
+query, including after a grant is revoked. Oracle's reader grants independently
+enforce access, and each query runs in a read-only transaction. These are object
+restrictions for the synthetic demo, not per-customer authorization.
+
+Bind parameters must exactly match SQL placeholder names. Parameter keys are
+lowercase simple identifiers; values are strings of at most 4000 characters,
+signed 64-bit integers, finite floats, or null. Booleans and collections are
+rejected. SQL is limited to 12,000 characters, 500 input syntax nodes, eight
+physical table references, and 50 parameters.
+
+Execution is bounded to two concurrent queries per MCP server. Set
+`SUPPORT_ORACLE_QUERY_TIMEOUT_SECONDS` (default 10, range 1..60) for the async
+deadline covering queueing, connection, metadata checks, execution, and fetching.
+Driver call timeouts also apply. Cancellation requests a server-side break and
+closes the connection; network cleanup can add time beyond the execution deadline.
+There is no background query thread left running after an application timeout.
+The database's own privileges remain necessary even when validation succeeds.
+
+`row_limit` accepts 1..100. An outer Oracle ROWNUM stopkey and bounded fetching
+retrieve at most one extra row to detect truncation. Results have at most 50
+columns, 4000 characters per text/CLOB cell, and a conservative 64 KiB JSON payload
+budget (before MCP transport encoding). Unsupported binary/object types fail.
+The response contains `columns` (names/types), positional `rows`, `row_count`,
+`row_limit`, `tables`, a random `query_id`, `truncated`, and `truncation_reasons`
+(`row_limit`, `cell_limit`, or `byte_limit`). Fractional Oracle NUMBER values are
+exact decimal strings; integral values are JSON integers. Dates/timestamps are ISO
+strings. Always check truncation before claiming complete results. This describes
+the submitted query result; an explicit LIMIT or WHERE clause can still narrow it.
+
+Errors use safe codes (`invalid_sql`, `invalid_parameters`, `unauthorized_object`,
+`unsupported_result`, `timeout`, `database_error`) and the MCP error flag. Logs
+record the random query ID, outcome, successful row count, and elapsed time rather
+than SQL text, parameter values, returned records, credentials, or raw driver errors.
+Tests cover rejected syntax, scope resolution, bind injection, metadata checks,
+output caps, cancellation/cleanup, MCP errors, and live Oracle queries/timeouts.
+
+References: [SQLGlot scope analysis](https://github.com/tobymao/sqlglot/blob/main/sqlglot/optimizer/scope.py)
+and [python-oracledb asynchronous connections](https://python-oracledb.readthedocs.io/en/stable/user_guide/asyncio.html).
 
 ### Existing application
 
@@ -604,8 +680,9 @@ arguments require actual integers; IDs are positive, history limits are 1..100,
 and policy limits are 1..20. Name/email search is literal, not a natural-language
 SQL engine. Interpreting full user questions is Phase 4's responsibility.
 
-The tools expose no arbitrary SQL, file reading, upload, ingestion, or mutation
-operation. Customer reads retain SQLite's read-only enforcement. Policy tools
+The SQLite tools expose no arbitrary SQL, file reading, upload, ingestion, or mutation
+operation. Oracle additionally exposes the restricted query and metadata tools
+documented above. SQLite customer reads retain read-only enforcement. Policy tools
 open an existing collection; a missing index produces an actionable error rather
 than silently creating one. Chroma may maintain internal storage files while
 opening/searching its local database, but the tool never adds or modifies policy

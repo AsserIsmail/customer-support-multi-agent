@@ -9,6 +9,7 @@ description = "Customer support assistant backed by customer records and policy 
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "sqlglot>=30.22,<31",
     "oracledb>=26,<27",
     "fastapi>=0.115,<1",
     "streamlit>=1.45,<2",

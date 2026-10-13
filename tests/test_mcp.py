@@ -197,7 +197,9 @@ create_server(Settings(Path("unused.db"), db_backend="oracle", oracle=settings),
                 tools = SupportTools(session)
                 discovered = {tool.name: tool for tool in await tools.list_tools()}
                 schema_tools = {"list_tables", "describe_table", "get_relationships", "search_schema", "refresh_schema_index"}
-                assert set(discovered) == TOOLS | schema_tools
+                assert set(discovered) == TOOLS | schema_tools | {"execute_readonly_query"}
+                rejected = await session.call_tool("execute_readonly_query", {"sql": "DELETE FROM orders"})
+                assert rejected.is_error and rejected.structured_content["code"] == "invalid_sql"
                 assert discovered["refresh_schema_index"].annotations.read_only_hint is False
                 assert all(discovered[name].annotations.read_only_hint is True for name in schema_tools - {"refresh_schema_index"})
                 listing = await tools.call("list_tables", {})

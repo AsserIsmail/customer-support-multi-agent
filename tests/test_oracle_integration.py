@@ -132,10 +132,73 @@ def test_live_schema_refresh_tracks_ddl_and_grants(migrated, tmp_path):
                         limited = SchemaCatalog(replace(migrated, allowed_tables=("ORDERS",)))
                         assert [item["table"] for item in limited.list_tables()["tables"]] == ["ORDERS"]
                         assert limited.get_relationships()["relationships"] == []
+                        assert (await tools.call("execute_readonly_query", {"sql": f"SELECT id FROM {table}"}))["status"] == "empty"
                         cursor.execute(f"REVOKE SELECT ON {table} FROM SUPPORT_READER")
+                        # Metadata remains cached, but execution must independently deny access.
+                        denied = await tools.session.call_tool("execute_readonly_query", {"sql": f"SELECT id FROM {table}"})
+                        assert denied.is_error and denied.structured_content["code"] == "unauthorized_object"
                         await tools.call("refresh_schema_index", {})
                         assert (await tools.call("describe_table", {"table": table}))["status"] == "not_found"
                         assert (await tools.call("search_schema", {"query": "tracking_reference"}))["status"] == "no_matches"
                 asyncio.run(run())
             finally:
                 cursor.execute(f"DROP TABLE {table} PURGE")
+
+
+def test_live_readonly_queries_through_mcp(migrated, tmp_path):
+    env = dict(os.environ, SUPPORT_DB_BACKEND="oracle", SUPPORT_ORACLE_USER=migrated.user,
+               SUPPORT_ORACLE_PASSWORD=migrated.password, SUPPORT_ORACLE_DSN=migrated.dsn,
+               SUPPORT_ORACLE_SCHEMA=migrated.schema)
+    env.pop("SUPPORT_ORACLE_OWNER_PASSWORD", None)
+    env.pop("SUPPORT_ORACLE_ADMIN_PASSWORD", None)
+
+    async def run():
+        async with connect_support_tools(cwd=tmp_path, env=env) as tools:
+            assert "execute_readonly_query" in {tool.name for tool in await tools.list_tools()}
+            result = await tools.call("execute_readonly_query", {
+                "sql": "SELECT o.id, o.placed_on, t.description FROM orders o JOIN tickets t "
+                       "ON t.order_id=o.id AND t.customer_id=o.customer_id "
+                       "WHERE o.customer_id=:customer_id ORDER BY o.id", "parameters": {"customer_id": 1}, "row_limit": 2})
+            assert [row[0] for row in result["rows"]] == [101, 102]
+            assert result["rows"][0][1] == "2025-01-11"
+            assert "second display" in result["rows"][0][2]
+            assert result["truncated"] is True and result["truncation_reasons"] == ["row_limit"]
+            cte = await tools.call("execute_readonly_query", {"sql":
+                "WITH matching AS (SELECT id FROM customers WHERE LOWER(name) LIKE :name) "
+                "SELECT COUNT(*) AS total FROM matching", "parameters": {"name": "%emma%"}})
+            assert cte["rows"] == [[2]]
+            fractional = await tools.call("execute_readonly_query", {"sql": "SELECT id/2 AS half_id FROM orders WHERE id=101"})
+            assert fractional["rows"] == [["50.5"]]
+            injected = await tools.call("execute_readonly_query", {"sql": "SELECT id FROM customers WHERE name=:name",
+                "parameters": {"name": "' OR 1=1 --"}})
+            assert injected["status"] == "empty"
+            for sql in ("DELETE FROM orders", "SELECT * FROM SYS.USER$", "SELECT * FROM orders FOR UPDATE",
+                        "SELECT UTL_HTTP.REQUEST('https://example.com') FROM orders", "SELECT * FROM orders@remote",
+                        "SELECT * FROM orders; SELECT * FROM tickets", "SELECT nonexistent_column FROM orders",
+                        "SELECT secret_package.read_secret FROM orders"):
+                result = await tools.session.call_tool("execute_readonly_query", {"sql": sql})
+                assert result.is_error
+                assert sql not in result.model_dump_json()
+            after = await tools.call("execute_readonly_query", {"sql": "SELECT COUNT(*) AS total FROM orders"})
+            assert after["rows"] == [[75]]
+    asyncio.run(run())
+
+
+def test_live_query_deadline_cancels_and_next_query_succeeds(migrated):
+    from dataclasses import replace
+    from time import monotonic
+    from support_ai.query_service import ReadonlyQueryService
+    from support_ai.sql_validation import QueryError
+    service = ReadonlyQueryService(replace(migrated, query_timeout_seconds=1))
+
+    async def run():
+        started = monotonic()
+        with pytest.raises(QueryError) as error:
+            await service.execute("SELECT SUM(MOD(a.id*b.id*c.id*d.id*e.id*f.id,97)) FROM orders a "
+                                  "JOIN orders b ON 1=1 JOIN orders c ON 1=1 JOIN orders d ON 1=1 "
+                                  "JOIN orders e ON 1=1 JOIN orders f ON 1=1")
+        assert error.value.code == "timeout"
+        assert monotonic() - started < 15
+        result = await service.execute("SELECT id FROM orders ORDER BY id", row_limit=1)
+        assert result["rows"] == [[101]]
+    asyncio.run(run())
