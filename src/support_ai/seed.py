@@ -61,6 +61,8 @@ def main() -> None:
     args = parser.parse_args()
     try:
         settings = Settings.from_env()
+        if settings.db_backend != "sqlite" and args.db is None:
+            parser.exit(1, "This seed command initializes SQLite only. Use --db for an explicit SQLite target.\n")
         configure_logging(settings.log_level)
         seed_database(args.db or settings.db_path)
     except (ValueError, OSError, sqlite3.Error) as exc:

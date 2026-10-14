@@ -1,12 +1,470 @@
 # Customer Support Multi-Agent AI
 
-A customer support assistant combining SQLite customer records with company policy
+A customer support assistant combining Oracle or SQLite customer records with company policy
 PDFs. Built incrementally for a technical hiring assessment.
 
 # Video Demo
 https://drive.google.com/file/d/1nyhptz4e2ERIvjOXr5eyZKM0FoNNDflS/view?usp=drive_link
 
 ## Implementation status
+
+### Oracle upgrade: phases 1-7
+
+Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
+and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
+Each application run uses one customer database; there is no replication or automatic
+fallback. Chroma remains the separate policy store. In Oracle mode, the SQL agent
+now discovers schema metadata before generating SQL and executes it through the
+validated MCP query tool. SQLite retains the fixed lookup workflow. Customer
+identity resolution remains shared between both backends.
+
+For a separately provisioned Oracle database with compatible customer tables, set:
+
+```dotenv
+SUPPORT_DB_BACKEND=oracle
+SUPPORT_ORACLE_USER=support_reader
+SUPPORT_ORACLE_PASSWORD=<set locally>
+SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1
+SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER
+SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS=5
+SUPPORT_ORACLE_CALL_TIMEOUT_MS=5000
+```
+
+The schema name accepts only a simple unquoted identifier. Use a dedicated reader
+with SELECT grants on the owner's customers, orders, and tickets tables; do not
+configure owner/admin credentials in the runtime. Connections open lazily for each
+lookup using python-oracledb's default Thin mode, bound values, and read-only
+transactions. Dates return as ISO calendar dates and monetary amounts remain
+integer cents. Driver errors do not expose connection details. The call timeout
+limits a database round trip, not the total duration of a multi-call request.
+
+Oracle provisioning, grants, Docker wiring, and migration are available on
+`phase/oracle-02-migration` (see below). The base Compose stack remains the SQLite demo. The seed CLI
+is SQLite-only and rejects an implicit SQLite target when Oracle is selected; an
+explicit `--db` can still create a SQLite migration source. No existing data is moved
+by selecting a backend.
+
+`/health` remains a liveness/configuration endpoint. It includes
+`customer_database_backend` and `customer_database_configured`; in Oracle mode,
+`customer_database_present` is null (unverified), rather than checking a SQLite
+file. It does not connect to Oracle or attest to credentials, grants, or readiness.
+
+Phase 1 tests use a mocked Oracle driver to verify bindings, serialization,
+pagination, cleanup, configuration, and sanitized failures, alongside the existing
+SQLite/MCP/application regressions. Phase 2 adds live Oracle verification in CI.
+New modules: `repositories.py` (protocol/factory) and `oracle_database.py` (adapter).
+
+### Oracle provisioning and migration (phase 2)
+
+The Oracle overlay uses `gvenzl/oracle-free:23.26.3-slim` with a persistent named
+volume and the image's health check. See the [image documentation](https://github.com/gvenzl/oci-oracle-free)
+for container requirements. Keep the SQLite source application stopped during
+migration. For a source using SQLite WAL, checkpoint it before mounting the database
+file alone; a WAL file can contain committed records absent from the main file.
+
+Set three **different**, local passwords in `.env`:
+`SUPPORT_ORACLE_ADMIN_PASSWORD`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
+`SUPPORT_ORACLE_PASSWORD` (the runtime reader). Owner/reader setup passwords must
+be 12..30 characters without double quotes or line breaks. Use
+`SUPPORT_SQLITE_MIGRATION_SOURCE` to select the existing SQLite file (default
+`./data/support.db`). The bind mount is read-only and refuses a nonexistent source.
+Do not paste expanded Compose configuration or credentials into logs or chat.
+
+From PowerShell, provision a fresh Oracle volume once:
+
+```powershell
+docker compose -f compose.yaml -f compose.oracle.yaml config --quiet
+docker compose -f compose.yaml -f compose.oracle.yaml up -d oracle
+docker compose -f compose.yaml -f compose.oracle.yaml run --build --rm oracle-setup
+docker compose -f compose.yaml -f compose.oracle.yaml up --build -d api ui
+```
+
+The final command runs the `seed` service as a **migration**, waits for successful
+completion, then starts the API with `SUPPORT_READER`. The UI is unchanged.
+The API receives only reader credentials; the migration service receives the owner
+password, and the one-time setup service receives the admin/owner/reader passwords.
+Chroma stays in the existing support-data volume, separate from oracle-data.
+
+Setup creates `SUPPORT_OWNER` with session/table creation privileges and a bounded
+tablespace quota, and `SUPPORT_READER` with CREATE SESSION plus SELECT on the three
+support tables. Setup refuses to change existing accounts. Oracle DDL commits
+implicitly: a failed setup may leave partial objects requiring operator inspection;
+the command deliberately never drops, resets, or replaces accounts. Changing `.env`
+passwords does not rotate passwords already stored in an existing database volume.
+
+For a native application connecting to this container, configure
+`SUPPORT_DB_BACKEND=oracle`, `SUPPORT_ORACLE_USER=SUPPORT_READER`,
+`SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER`, and
+`SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1`. Compose sets its internal DSN itself.
+The equivalent native setup/migration commands are:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.oracle_setup
+.\.venv\Scripts\python.exe -m support_ai.oracle_migrate --source data/support.db
+```
+
+Migration reads a consistent SQLite snapshot, checks integrity, locks the three
+Oracle target tables, and copies customers, orders, then tickets using bound values.
+It verifies all columns of every row before a single commit. IDs, integer cents,
+ISO dates, nullable ticket order IDs, unique constraints, and the composite
+ticket/order foreign key are preserved. An identical target reports `unchanged`;
+any populated but different target is rejected without overwrite. Copy/verification
+failures roll back the transaction. Empty strings, invalid dates, and incompatible
+source values are rejected rather than silently altered. This in-memory migration
+is intended for the small synthetic demo, not a large production database.
+
+To stop services while retaining data:
+
+```powershell
+docker compose -f compose.yaml -f compose.oracle.yaml down
+```
+
+Do not add `--volumes` unless deleting the saved databases is intentional.
+
+Offline tests run normally. To run the live integration tests, use a
+**dedicated test PDB** already provisioned by the setup command. It must be empty
+or contain exactly the unchanged synthetic seed; tests refuse conflicting data.
+Export `SUPPORT_ORACLE_DSN`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
+`SUPPORT_ORACLE_PASSWORD` into the test process environment, then:
+
+```powershell
+$env:SUPPORT_ORACLE_TESTS = "1"
+.\.venv\Scripts\python.exe -m pytest -q tests/test_oracle_integration.py
+Remove-Item Env:SUPPORT_ORACLE_TESTS
+```
+
+The live suite checks exact migration/rerun behavior, Oracle lookup serialization,
+MCP invocation, composite foreign keys, and database-enforced reader restrictions.
+It leaves synthetic records in that test PDB. CI provisions an isolated Oracle
+service for this suite. All four live Oracle integration tests passed in the
+[phase 2 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38299246543).
+Local verification passed 148 tests with the four live tests skipped, validated the
+Compose overlay, and built the wheel with its schema resource. The local Docker
+engine was unavailable, so a local Compose application startup remains unverified.
+
+### Oracle schema discovery (phase 3)
+
+Branch `phase/oracle-03-schema` adds five Oracle-only MCP tools. SQLite keeps its
+existing five customer/policy tools. The new tools use the same runtime reader
+account and do not require owner credentials, catalog-wide grants, embeddings,
+or another database. They read Oracle `ALL_*` dictionary views, never customer rows.
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_tables` | None | Accessible allowlisted tables, comments, and column counts |
+| `describe_table` | `table` | Columns/types/nullability, constraints, ordered index columns, outbound foreign keys |
+| `get_relationships` | Optional `table` | Inbound and outbound foreign keys, with ordered source/target column pairs |
+| `search_schema` | `query`, optional `limit` (1..50) | Ranked keyword matches in table/column names, types, and comments |
+| `refresh_schema_index` | None | Reloaded metadata version, refresh timestamp, and table count |
+
+Set `SUPPORT_ORACLE_ALLOWED_TABLES=CUSTOMERS,ORDERS,TICKETS` and
+`SUPPORT_ORACLE_SCHEMA_CACHE_TTL_SECONDS=300` (defaults shown). The table list
+accepts 1..50 distinct simple unquoted identifiers, normalized to uppercase; TTL
+accepts 1..3600 seconds. Only accessible tables in the configured
+`SUPPORT_ORACLE_SCHEMA` that also appear in this list are exposed. Both ends of a
+relationship must be in that catalog, so cross-schema or unauthorized targets
+are not disclosed. Qualified names, database links, quoted table names, and
+unauthorized table arguments are rejected. Column names retain Oracle's spelling.
+This allowlist governs discovery; existing fixed customer lookup contracts are
+unchanged. It is not a substitute for database grants or customer authorization.
+
+The process-local cache loads on the first schema call and refreshes on the next
+call after its TTL. An explicit refresh rebuilds it immediately. Updates are
+atomic, concurrent first reads share one load, and a failed refresh invalidates
+the old snapshot and returns a sanitized MCP error. Each result includes
+`schema_version` (a content hash), `refreshed_at` (UTC), and `cache_ttl_seconds`.
+Unchanged metadata retains its version across refreshes. Cached metadata can lag
+DDL or permission changes until refresh/expiry; it must not authorize SQL execution.
+
+Search uses a small in-memory inverted index with case-insensitive word matching,
+underscore splitting, and simple plural matching. It is keyword search, not
+semantic search: `amount cents`, `order`, or a known column/comment keyword are
+good inputs. Results include scores, total match count, and a truncation flag.
+Empty search results are distinct from connection or discovery failures.
+Dictionary reads are bounded to 20,000 rows per metadata query; oversized catalogs
+fail instead of silently returning incomplete metadata. Oracle's
+`SEARCH_CONDITION_VC` may truncate long check expressions; results flag conditions
+that reach its 4000-byte limit. Index expression text is not reconstructed.
+
+Composite relationships are returned as a single foreign key containing ordered
+`column_pairs`. In particular, tickets `(ORDER_ID, CUSTOMER_ID)` refers to orders
+`(ID, CUSTOMER_ID)`; the Oracle SQL planner receives both pairs for that relationship.
+Constraint status and validation state are included. Metadata comments and check
+expressions are untrusted data, not instructions to the model.
+
+`refresh_schema_index` changes only the in-memory cache. Its MCP annotation marks
+that state change; it does not execute DDL or modify customer/policy records.
+The catalog is available through the existing client boundary, for example:
+
+```python
+async with connect_support_tools() as tools:
+    tables = await tools.call("list_tables", {})
+    columns = await tools.call("describe_table", {"table": "orders"})
+    joins = await tools.call("get_relationships", {"table": "orders"})
+    matches = await tools.call("search_schema", {"query": "amount cents"})
+```
+
+Tests cover dictionary joins, composite ordering, authorization scope, caching,
+concurrency, version changes, error redaction, and invocation over real MCP stdio.
+The opt-in Oracle integration suite additionally creates and removes one uniquely
+named test table to verify discovery after grants, column DDL, refresh, and grant
+revocation; it never alters the three customer-data tables for this test. Run the
+same `tests/test_oracle_integration.py` command described above on a dedicated PDB.
+
+Phase 3 validation: 177 local tests passed with five live tests skipped. All five
+live Oracle tests passed in the [phase 3 CI run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38300972259),
+including discovery over MCP, composite relationships, newly granted tables,
+column changes, and grant revocation. Compose configuration and dependency checks
+also passed. Local Oracle startup remains unverified because the Docker engine
+was unavailable.
+
+Dictionary references: [ALL_TAB_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/ALL_TAB_COLUMNS.html),
+[ALL_CONS_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/ALL_CONS_COLUMNS.html),
+and [ALL_IND_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/refrn/ALL_IND_COLUMNS.html).
+
+### Restricted Oracle SQL execution (phase 4)
+
+Branch `phase/oracle-04-query` adds the Oracle-only MCP tool
+`execute_readonly_query(sql, parameters=None, row_limit=50)`. It executes one
+supported Oracle SELECT using the existing reader account. SQLite's tool set and
+the current agent workflow remain unchanged. Example through the existing MCP client:
+
+```python
+result = await tools.call("execute_readonly_query", {
+    "sql": "SELECT o.id, o.status, t.subject FROM orders o JOIN tickets t "
+           "ON t.order_id=o.id AND t.customer_id=o.customer_id "
+           "WHERE o.customer_id=:customer_id ORDER BY o.id",
+    "parameters": {"customer_id": 1},
+    "row_limit": 10,
+})
+```
+
+The validator uses SQLGlot's Oracle dialect and an explicit allowlist of syntax
+tree nodes. It supports SELECTs, ON/USING joins, nonrecursive CTEs, subqueries,
+filters, grouping, ordering, CASE, ordinary row offsets/limits, and a small set of
+built-ins: COUNT, SUM, MIN, MAX, AVG, LOWER, UPPER, LENGTH, ABS, ROUND, COALESCE/NVL,
+and date literals. Arithmetic and string concatenation are supported. Set
+operations, window functions, recursive/hierarchical queries, casts, and other
+unlisted syntax are deliberately unsupported in this first executor.
+
+DDL, DML, PL/SQL, multiple statements, locking reads, hints, package/user-defined
+function calls, sequences, pseudocolumns, database links, and unauthorized objects
+are rejected. Bare and qualified table names are resolved against
+`SUPPORT_ORACLE_SCHEMA` and `SUPPORT_ORACLE_ALLOWED_TABLES`, then rewritten with an
+explicit quoted owner. CTE aliases are distinguished from physical tables.
+Only regenerated validated SQL is executed; comments and original unparsed text
+are never forwarded to Oracle.
+
+Before execution, the service checks accessible physical tables and columns using
+fresh `ALL_TABLES`/`ALL_TAB_COLUMNS` reads on its own connection. Every column and
+alias is resolved against those results; missing/ambiguous columns and dotted
+package-like attributes fail validation. The discovery cache cannot authorize a
+query, including after a grant is revoked. Oracle's reader grants independently
+enforce access, and each query runs in a read-only transaction. These are object
+restrictions for the synthetic demo, not per-customer authorization.
+
+Bind parameters must exactly match SQL placeholder names. Parameter keys are
+lowercase simple identifiers; values are strings of at most 4000 characters,
+signed 64-bit integers, finite floats, or null. Booleans and collections are
+rejected. SQL is limited to 12,000 characters, 500 input syntax nodes, eight
+physical table references, and 50 parameters.
+
+Execution is bounded to two concurrent queries per MCP server. Set
+`SUPPORT_ORACLE_QUERY_TIMEOUT_SECONDS` (default 10, range 1..60) for the async
+deadline covering queueing, connection, metadata checks, execution, and fetching.
+Driver call timeouts also apply. Cancellation requests a server-side break and
+closes the connection; network cleanup can add time beyond the execution deadline.
+There is no background query thread left running after an application timeout.
+The database's own privileges remain necessary even when validation succeeds.
+
+`row_limit` accepts 1..100. An outer Oracle ROWNUM stopkey and bounded fetching
+retrieve at most one extra row to detect truncation. Results have at most 50
+columns, 4000 characters per text/CLOB cell, and a conservative 64 KiB JSON payload
+budget (before MCP transport encoding). Unsupported binary/object types fail.
+The response contains `columns` (names/types), positional `rows`, `row_count`,
+`row_limit`, `tables`, a random `query_id`, `truncated`, and `truncation_reasons`
+(`row_limit`, `cell_limit`, or `byte_limit`). Fractional Oracle NUMBER values are
+exact decimal strings; integral values are JSON integers. Dates/timestamps are ISO
+strings. Always check truncation before claiming complete results. This describes
+the submitted query result; an explicit LIMIT or WHERE clause can still narrow it.
+
+Errors use safe codes (`invalid_sql`, `invalid_columns`, `invalid_parameters`, `unauthorized_object`,
+`unsupported_result`, `timeout`, `database_error`) and the MCP error flag. Logs
+record the random query ID, outcome, successful row count, and elapsed time rather
+than SQL text, parameter values, returned records, credentials, or raw driver errors.
+Tests cover rejected syntax, scope resolution, bind injection, metadata checks,
+output caps, cancellation/cleanup, MCP errors, and live Oracle queries/timeouts.
+
+Phase 4 validation: 270 local tests passed with seven live tests skipped. All seven
+live Oracle tests passed in CI, including query cancellation at the deadline and
+a successful subsequent query. Linux, Windows, and container checks also passed
+([validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38365594245)).
+The async driver handles the server-side break; the service does not send a
+second cancellation signal during connection cleanup. Phase 5 connects discovery and this executor to the SQL agent (below).
+
+References: [SQLGlot scope analysis](https://github.com/tobymao/sqlglot/blob/main/sqlglot/optimizer/scope.py)
+and [python-oracledb asynchronous connections](https://python-oracledb.readthedocs.io/en/stable/user_guide/asyncio.html).
+
+### Schema-grounded SQL agent (phase 5)
+
+Branch `phase/oracle-05-agent` connects discovery to the actual LangGraph SQL node.
+After resolving a customer (including ambiguous-name clarification and follow-up
+context), the node detects the Oracle executor through MCP tool discovery. It calls
+`list_tables`, `search_schema`, `describe_table`, and `get_relationships` before
+asking the model to generate an Oracle SELECT. The planner receives actual columns,
+constraints, indexes, foreign-key column pairs, owner, and schema version.
+
+```mermaid
+flowchart LR
+    User --> Supervisor
+    Supervisor --> SQL[SQL agent: resolve customer]
+    SQL --> Discovery[MCP schema discovery]
+    Discovery --> Planner[Generate Oracle SELECT using metadata]
+    Planner --> Executor[MCP validated read-only executor]
+    Executor --> Evidence[SQL result evidence]
+    Supervisor --> RAG[Policy RAG]
+    Evidence --> RAG
+    Evidence --> Synthesis
+    RAG --> Synthesis
+    Synthesis --> Answer
+    SQL --> SQLite[SQLite fixed lookups]
+    SQLite --> Evidence
+```
+
+All database access stays behind MCP. The agent collects up to eight approved table
+descriptions (60,000 characters of metadata); schema search prioritizes them while
+retaining potential join tables. Mixed schema versions trigger a refresh. Invalid
+SQL, invalid binds, changed metadata, or unavailable approved tables get at most
+one refresh/replan attempt. Timeout and database failures stop immediately; Oracle
+errors never silently fall back to SQLite or fixed history lookups.
+
+Query results preserve columns, positional rows, query ID, schema version, and
+truncation flags in the evidence passed to RAG and synthesis. The final answer must
+reference query evidence, and the application adds a partial-results notice when
+retrieval was truncated. Existing policy citations and combined routing remain in
+place. Requests needing unavailable facts, such as a delivery date absent from the
+schema, can ask for clarification without submitting SQL.
+
+With Oracle configured and the existing chat application running, try:
+
+- "How many orders does Emma Wilson have in each status?"
+- "Show Emma Wilson's orders alongside their support tickets."
+- "Why hasn't Emma Wilson's latest order arrived, and is she eligible for a refund?"
+
+The current workflow remains customer-scoped and asks for a customer for global
+analytics. Customer selection and query filters are model guidance, **not row-level
+authorization**: this synthetic demo has no per-customer access-control boundary.
+The reader account, approved objects, and SQL validator enforce database access.
+Generated SQL can still be semantically wrong; tests with scripted model decisions
+verify orchestration and live execution, not the accuracy of a paid model on every
+natural-language question. Live model evaluation remains a separate demo check.
+
+Phase 5 validation: CI passed on Linux, Windows, and in the container. The general
+suite has 282 passing tests and eight opt-in live tests; all eight live Oracle tests
+passed in the dedicated integration job. The new graph test builds its JOIN from
+discovered composite foreign-key pairs and verifies the rows reaching synthesis.
+Unit tests cover repair limits, schema-version changes, missing metadata, ambiguity,
+combined SQL/RAG routing, query-evidence requirements, and truncation notices.
+See the [phase 5 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38367655691).
+
+### End-to-end verification (phase 6)
+
+Branch `phase/oracle-06-verification` adds a repeatable combined conversation through
+real database storage, PDF extraction, persistent Chroma, MCP stdio, and LangGraph.
+The same scenario runs against SQLite locally and Oracle in the integration job:
+
+1. Ask about Emma's return and verify clarification lists the two real matches.
+2. Select Emma Wilson and retrieve her latest order plus a refund policy passage.
+3. On Oracle, submit an unknown column, then verify one metadata refresh and SQL repair.
+4. Verify the shipped order reaches synthesis alongside the actual PDF passage,
+   and the final answer has the verified filename/page citation and asks for delivery information.
+5. Follow up about her order, then switch to a general policy question; verify fresh
+   evidence and no leftover customer records in the policy-only answer.
+6. Reject a write on Oracle and verify orders remain readable afterward.
+
+Run the local scenario without API credentials:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q tests/test_end_to_end.py
+```
+
+The Oracle case uses the same opt-in `SUPPORT_ORACLE_TESTS=1` and disposable database
+configuration as the existing integration suite. CI runs both scenarios with all
+Oracle integration tests. Model decisions and embeddings are deterministic test
+implementations; production code has no fake-model mode. These checks establish
+component integration and recovery, not natural-language model quality.
+
+Phase 6 validation: 283 local tests passed with nine Oracle-dependent cases skipped.
+Linux, Windows, and container CI checks passed. The integration job passed all ten
+tests: eight Oracle integration tests plus this combined scenario on both backends.
+See the [phase 6 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38368764665).
+A paid live-model evaluation was not run as part of this automated verification.
+
+For a live model demonstration, complete the Oracle setup and policy ingestion
+instructions above, configure your API key locally, and run the existing chat CLI:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.chat --question "Can Emma return her latest order?" --question "I mean Emma Wilson" --question "Show her latest order" --question "What is the refund policy?"
+```
+
+This command makes paid model and embedding calls. Check that ambiguity is resolved,
+SQL evidence matches the synthetic records, policy answers cite the ingested PDF,
+and the assistant asks for missing delivery facts rather than approving a refund.
+Also try the aggregation and JOIN questions in phase 5. Record the model name,
+question, answer, trace, sources, and any incorrect SQL semantics when assessing
+quality; never treat scripted test success as a live-model evaluation result.
+
+### Live-model evaluation (phase 7)
+
+Branch `phase/oracle-07-live-evaluation` adds an opt-in evaluation runner:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.evaluate --backend oracle --output output/evaluation/oracle-live.json
+```
+
+The configured backend must match the argument. The runner uses the application's
+configured chat model (default `gpt-4.1-mini`) and makes paid model/embedding calls.
+It expects the synthetic Emma Wilson dataset and an ingested policy index. Seven
+questions cover ambiguity, clarification, follow-ups, aggregates, JOINs, combined
+policy questions, and topic changes. `--backend sqlite` checks the compatibility
+path; it does not validate Oracle SQL generation.
+
+Reports include baseline records, model decisions, tool calls, query results,
+answers, elapsed times, and structural checks. They contain record/document text,
+so keep them under ignored `output/evaluation/` and review before sharing. They do
+not include connection settings or API keys. Structural checks are not semantic
+accuracy scores: compare generated SQL and answers against the baseline records
+and retrieved policy passages. The runner stops early if the supervisor cannot
+access the model. See [OpenAI evaluation guidance](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
+for separating workflow checks from task-specific answer evaluation.
+
+The initial local attempt received authentication errors; correcting the local API
+key resolved model access. The subsequent SQLite run found a routing error: a request
+for orders alongside tickets was sent to both SQL and policy retrieval. The supervisor
+prompt now explicitly distinguishes multiple database entities from policy questions.
+A rerun with `gpt-4.1-mini` passed all seven structural checks, and manual inspection
+confirmed the returned IDs, counts, citations, and missing-delivery clarification
+against the retrieved evidence. This is one small smoke evaluation, not a general
+accuracy benchmark. Reports remain local under ignored `output/evaluation/`.
+
+Oracle live evaluation completed on 2026-10-14 with the same seven questions and
+`gpt-4.1-mini`. The first run exposed a CTE projection mistake that the repair repeated.
+Column/alias validation now returns the safe `invalid_columns` code, and the planner
+is instructed to audit CTE projections and join keys. The rerun passed all seven
+structural checks. Reviewed SQL used discovered columns, customer binds, aggregation,
+and both column pairs of the ticket/order relationship; reviewed answers matched
+the retrieved records and policy evidence. The Oracle-backed browser demo also
+passed aggregation, refund clarification, and policy-source display checks.
+
+Local setup findings: upgrading Docker Desktop and clearing its stale extension
+process restored the engine. Use `127.0.0.1:1521/FREEPDB1` for the Windows loopback
+connection: measured connection time was about 0.04 seconds versus 2.07 seconds
+with `localhost` on the evaluation machine. The database limits were not relaxed.
+See [the evaluation report](docs/evaluations/phase-07.md) for results and limitations.
+These are small smoke evaluations, not a statistical accuracy benchmark. No final
+merge has been performed.
+
+### Existing application
 
 **Locally runnable support application.** Configuration, reproducible fictional
 data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
@@ -390,8 +848,9 @@ arguments require actual integers; IDs are positive, history limits are 1..100,
 and policy limits are 1..20. Name/email search is literal, not a natural-language
 SQL engine. Interpreting full user questions is Phase 4's responsibility.
 
-The tools expose no arbitrary SQL, file reading, upload, ingestion, or mutation
-operation. Customer reads retain SQLite's read-only enforcement. Policy tools
+The SQLite tools expose no arbitrary SQL, file reading, upload, ingestion, or mutation
+operation. Oracle additionally exposes the restricted query and metadata tools
+documented above. SQLite customer reads retain read-only enforcement. Policy tools
 open an existing collection; a missing index produces an actionable error rather
 than silently creating one. Chroma may maintain internal storage files while
 opening/searching its local database, but the tool never adds or modifies policy
@@ -437,8 +896,9 @@ conversation, use multiple `--question` flags in the same invocation:
 Each scripted response includes `status`, `answer`, `sources`, `route`, and `trace`.
 The trace lists the graph nodes that ran, making routing reviewable. The terminal
 interface prints the answer. This sends questions and relevant synthetic records
-and policy passages to OpenAI for inference. A SQL turn normally makes three model
-calls; a combined turn makes four, plus a query-embedding request.
+and policy passages to OpenAI for inference. With SQLite, a SQL turn normally makes three model
+calls; a combined turn makes four, plus a query-embedding request. Oracle adds one
+SQL-generation call and, only after a recoverable query failure, one repair call.
 
 ### Graph behavior
 
@@ -454,11 +914,11 @@ small finish node to record conversation history.
 - **Supervisor:** uses a structured model decision to choose SQL, RAG, both,
   clarification, or an out-of-scope reply. It rewrites follow-ups into standalone
   requests and separates a new topic from an unfinished prior request.
-- **SQL specialist:** plans a customer lookup and the required histories. Python
-  executes only the named MCP lookup tools. Multiple customer matches produce a
-  deterministic clarification listing actual matches. A new customer replaces the
-  previously selected customer. Optional order/ticket status filters are applied
-  to retrieved records.
+- **SQL specialist:** resolves the customer through MCP lookup tools. Multiple
+  matches produce a deterministic clarification listing actual matches. A new
+  customer replaces the previously selected customer. SQLite uses fixed history
+  lookups and Python status filters. Oracle discovers schema and relationships,
+  generates a bound SELECT, and calls the validated MCP executor.
 - **RAG specialist:** produces a focused policy query and calls `policy_search`
   through MCP. No matching policy evidence prevents a policy conclusion.
 - **Synthesis:** receives fresh evidence from this turn, then returns typed answer
@@ -473,9 +933,10 @@ small finish node to record conversation history.
 
 ### Limits and error handling
 
-The graph has no autonomous tool loop. SQL retrieval is bounded to four pages of
+The graph has no autonomous tool loop. SQLite retrieval is bounded to four pages of
 50 records per requested history, and up to 50 matching records are sent to
-synthesis. Evidence marks incomplete retrieval and omitted records. Policy search
+synthesis. Oracle allows two planning attempts and at most 100 result rows, with
+additional query time, column, cell, and payload limits described above. Evidence marks incomplete retrieval and omitted records. Policy search
 returns at most five passages. Questions are capped at 4,000 characters. Model
 requests have a configurable timeout and one retry. Errors are returned as an
 explicit `error` status without raw provider details or stale answers.

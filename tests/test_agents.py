@@ -36,6 +36,9 @@ class FakeTools:
         self.passages = [PASSAGE] if passages is None else passages
         self.fail = fail
 
+    async def list_tools(self):
+        return []
+
     async def call(self, name, arguments):
         self.calls.append((name, arguments))
         if name == self.fail:

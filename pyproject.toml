@@ -9,6 +9,8 @@ description = "Customer support assistant backed by customer records and policy 
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "sqlglot>=30.22,<31",
+    "oracledb>=26,<27",
     "fastapi>=0.115,<1",
     "streamlit>=1.45,<2",
     "httpx>=0.28,<1",
@@ -35,6 +37,11 @@ support-mcp = "support_ai.mcp_server:main"
 support-mcp-check = "support_ai.mcp_client:main"
 support-chat = "support_ai.chat:main"
 support-api = "support_ai.api:main"
+support-oracle-setup = "support_ai.oracle_setup:main"
+support-oracle-migrate = "support_ai.oracle_migrate:main"
+
+[tool.setuptools.package-data]
+support_ai = ["sql/*.sql"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
