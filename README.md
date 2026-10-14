@@ -1,996 +1,192 @@
 # Customer Support Multi-Agent AI
 
-A customer support assistant combining Oracle or SQLite customer records with company policy
-PDFs. Built incrementally for a technical hiring assessment.
+A customer support assistant that answers questions using customer records and company policy PDFs. It can look up orders and tickets, clarify ambiguous customer names, remember follow-up questions, and combine database facts with cited policy passages.
 
-# Video Demo
-https://drive.google.com/file/d/1nyhptz4e2ERIvjOXr5eyZKM0FoNNDflS/view?usp=drive_link
+[Watch the video demo](https://drive.google.com/file/d/1nyhptz4e2ERIvjOXr5eyZKM0FoNNDflS/view?usp=drive_link)
 
-## Implementation status
+## What is implemented
 
-### Oracle upgrade: phases 1-7
+- **Conversational support:** a supervisor routes each question to the SQL agent, policy agent, or both, then synthesizes an evidence-based answer.
+- **Schema-aware Oracle queries:** the SQL agent calls MCP tools to discover tables, columns, and relationships **before generating SQL**. Discovery is part of the actual answer workflow.
+- **Restricted SQL execution:** generated queries pass SQLGlot validation and run through a read-only Oracle account, with bound parameters, timeouts, and result limits. The agent can refresh metadata and retry once after a repairable error.
+- **Policy retrieval with citations:** uploaded PDFs are split into passages, embedded, and searched in Chroma. Answers include source/page citations.
+- **Web and terminal interfaces:** Streamlit chat, a FastAPI backend, and a CLI, with automated tests and live-model evaluation.
 
-Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
-and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
-Each application run uses one customer database; there is no replication or automatic
-fallback. Chroma remains the separate policy store. In Oracle mode, the SQL agent
-now discovers schema metadata before generating SQL and executes it through the
-validated MCP query tool. SQLite retains the fixed lookup workflow. Customer
-identity resolution remains shared between both backends.
+The demo contains **25 customers, 75 orders, and 75 tickets**, plus a generated policy PDF.
 
-For a separately provisioned Oracle database with compatible customer tables, set:
+## Architecture and technology
+
+```mermaid
+flowchart TD
+    UI[Streamlit chat] --> API[FastAPI]
+    API --> GRAPH[LangGraph supervisor and conversation state]
+    CLI[Terminal chat] --> GRAPH
+    GRAPH --> SQL[SQL agent]
+    GRAPH --> RAG[Policy retrieval agent]
+    SQL --> MCP[MCP server: retrieval tools]
+    RAG --> MCP
+    MCP --> DISC[Oracle schema discovery]
+    DISC --> ORACLE[(Oracle)]
+    DISC -. Metadata informs SQL generation .-> SQL
+    MCP --> VALID[SQLGlot validation and bounded execution]
+    VALID --> ORACLE
+    MCP --> LOOKUP[Fixed customer, order, and ticket lookups]
+    LOOKUP --> DB[(Selected backend: Oracle or SQLite)]
+    MCP --> CHROMA[(Chroma policy passages)]
+    PDF[PDF ingestion and embeddings] --> CHROMA
+    SQL --> ANSWER[Answer synthesis with evidence]
+    RAG --> ANSWER
+    ANSWER --> CLIENT[Response to web or terminal]
+```
+
+| Technology | Role |
+| --- | --- |
+| Python 3.13, LangGraph | Agent routing, conversation state, and workflow |
+| OpenAI | Chat decisions and SQL generation (`gpt-4.1-mini`); policy embeddings (`text-embedding-3-small`) |
+| MCP | Tool boundary between agents and data retrieval |
+| Oracle, python-oracledb, SQLGlot | Relational data, schema discovery, and validated read-only SQL |
+| SQLite | Lightweight alternative using fixed lookup tools |
+| Chroma, PyMuPDF | Policy vector search and PDF text extraction |
+| FastAPI, Streamlit, Docker Compose | API, chat interface, and local services |
+
+**Choose one customer database per run.** Oracle is the full schema-aware workflow; SQLite is the simpler default in `.env.example`. Chroma is a separate policy store in either mode. There is no automatic synchronization or fallback between Oracle and SQLite. The migration command copies and verifies a SQLite snapshot into Oracle.
+
+## Run locally
+
+These commands use **PowerShell**, from the repository root. You need Python **3.13**, an OpenAI API key, and Docker Desktop running for Oracle. Model calls and policy ingestion use the paid OpenAI API.
+
+### 1. Install and configure
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+Edit `.env` locally. For the full Oracle workflow, set:
 
 ```dotenv
+OPENAI_API_KEY=<your API key>
 SUPPORT_DB_BACKEND=oracle
-SUPPORT_ORACLE_USER=support_reader
-SUPPORT_ORACLE_PASSWORD=<set locally>
-SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1
+SUPPORT_ORACLE_USER=SUPPORT_READER
 SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER
-SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS=5
-SUPPORT_ORACLE_CALL_TIMEOUT_MS=5000
+SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1
+SUPPORT_ORACLE_ADMIN_PASSWORD=<local admin password>
+SUPPORT_ORACLE_OWNER_PASSWORD=<local owner password>
+SUPPORT_ORACLE_PASSWORD=<local reader password>
 ```
 
-The schema name accepts only a simple unquoted identifier. Use a dedicated reader
-with SELECT grants on the owner's customers, orders, and tickets tables; do not
-configure owner/admin credentials in the runtime. Connections open lazily for each
-lookup using python-oracledb's default Thin mode, bound values, and read-only
-transactions. Dates return as ISO calendar dates and monetary amounts remain
-integer cents. Driver errors do not expose connection details. The call timeout
-limits a database round trip, not the total duration of a multi-call request.
+Use three distinct passwords, each 12–30 characters without double quotes or line breaks. Keep credentials in the ignored `.env` file. Other settings and defaults are in [.env.example](.env.example).
 
-Oracle provisioning, grants, Docker wiring, and migration are available on
-`phase/oracle-02-migration` (see below). The base Compose stack remains the SQLite demo. The seed CLI
-is SQLite-only and rejects an implicit SQLite target when Oracle is selected; an
-explicit `--db` can still create a SQLite migration source. No existing data is moved
-by selecting a backend.
-
-`/health` remains a liveness/configuration endpoint. It includes
-`customer_database_backend` and `customer_database_configured`; in Oracle mode,
-`customer_database_present` is null (unverified), rather than checking a SQLite
-file. It does not connect to Oracle or attest to credentials, grants, or readiness.
-
-Phase 1 tests use a mocked Oracle driver to verify bindings, serialization,
-pagination, cleanup, configuration, and sanitized failures, alongside the existing
-SQLite/MCP/application regressions. Phase 2 adds live Oracle verification in CI.
-New modules: `repositories.py` (protocol/factory) and `oracle_database.py` (adapter).
-
-### Oracle provisioning and migration (phase 2)
-
-The Oracle overlay uses `gvenzl/oracle-free:23.26.3-slim` with a persistent named
-volume and the image's health check. See the [image documentation](https://github.com/gvenzl/oci-oracle-free)
-for container requirements. Keep the SQLite source application stopped during
-migration. For a source using SQLite WAL, checkpoint it before mounting the database
-file alone; a WAL file can contain committed records absent from the main file.
-
-Set three **different**, local passwords in `.env`:
-`SUPPORT_ORACLE_ADMIN_PASSWORD`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
-`SUPPORT_ORACLE_PASSWORD` (the runtime reader). Owner/reader setup passwords must
-be 12..30 characters without double quotes or line breaks. Use
-`SUPPORT_SQLITE_MIGRATION_SOURCE` to select the existing SQLite file (default
-`./data/support.db`). The bind mount is read-only and refuses a nonexistent source.
-Do not paste expanded Compose configuration or credentials into logs or chat.
-
-From PowerShell, provision a fresh Oracle volume once:
+### 2. Create the demo database — first run only
 
 ```powershell
-docker compose -f compose.yaml -f compose.oracle.yaml config --quiet
-docker compose -f compose.yaml -f compose.oracle.yaml up -d oracle
-docker compose -f compose.yaml -f compose.oracle.yaml run --build --rm oracle-setup
-docker compose -f compose.yaml -f compose.oracle.yaml up --build -d api ui
-```
+# Create the SQLite snapshot used as the migration source.
+.\.venv\Scripts\python.exe -m support_ai.seed --db data/support.db
 
-The final command runs the `seed` service as a **migration**, waits for successful
-completion, then starts the API with `SUPPORT_READER`. The UI is unchanged.
-The API receives only reader credentials; the migration service receives the owner
-password, and the one-time setup service receives the admin/owner/reader passwords.
-Chroma stays in the existing support-data volume, separate from oracle-data.
+# Start Oracle and wait until it is healthy.
+docker compose -f compose.yaml -f compose.oracle.yaml up -d --wait oracle
 
-Setup creates `SUPPORT_OWNER` with session/table creation privileges and a bounded
-tablespace quota, and `SUPPORT_READER` with CREATE SESSION plus SELECT on the three
-support tables. Setup refuses to change existing accounts. Oracle DDL commits
-implicitly: a failed setup may leave partial objects requiring operator inspection;
-the command deliberately never drops, resets, or replaces accounts. Changing `.env`
-passwords does not rotate passwords already stored in an existing database volume.
-
-For a native application connecting to this container, configure
-`SUPPORT_DB_BACKEND=oracle`, `SUPPORT_ORACLE_USER=SUPPORT_READER`,
-`SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER`, and
-`SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1`. Compose sets its internal DSN itself.
-The equivalent native setup/migration commands are:
-
-```powershell
+# Create the owner, schema, and restricted reader; then import the demo data.
 .\.venv\Scripts\python.exe -m support_ai.oracle_setup
 .\.venv\Scripts\python.exe -m support_ai.oracle_migrate --source data/support.db
 ```
 
-Migration reads a consistent SQLite snapshot, checks integrity, locks the three
-Oracle target tables, and copies customers, orders, then tickets using bound values.
-It verifies all columns of every row before a single commit. IDs, integer cents,
-ISO dates, nullable ticket order IDs, unique constraints, and the composite
-ticket/order foreign key are preserved. An identical target reports `unchanged`;
-any populated but different target is rejected without overwrite. Copy/verification
-failures roll back the transaction. Empty strings, invalid dates, and incompatible
-source values are rejected rather than silently altered. This in-memory migration
-is intended for the small synthetic demo, not a large production database.
+Provisioning expects a fresh database and refuses to overwrite existing accounts. Skip `oracle_setup` after the first successful setup. Migration verifies every record; an identical rerun is unchanged, while conflicting data is rejected. Changing passwords in `.env` does not change existing database passwords.
 
-To stop services while retaining data:
+**Prefer SQLite?** Set `SUPPORT_DB_BACKEND=sqlite`, run only the seed command above, and continue below. Docker and Oracle credentials are unnecessary. SQLite supports the same chat and policy interface through fixed record lookups; generated schema-aware SQL is Oracle-only.
+
+### 3. Add the demo policies
 
 ```powershell
-docker compose -f compose.yaml -f compose.oracle.yaml down
-```
-
-Do not add `--volumes` unless deleting the saved databases is intentional.
-
-Offline tests run normally. To run the live integration tests, use a
-**dedicated test PDB** already provisioned by the setup command. It must be empty
-or contain exactly the unchanged synthetic seed; tests refuse conflicting data.
-Export `SUPPORT_ORACLE_DSN`, `SUPPORT_ORACLE_OWNER_PASSWORD`, and
-`SUPPORT_ORACLE_PASSWORD` into the test process environment, then:
-
-```powershell
-$env:SUPPORT_ORACLE_TESTS = "1"
-.\.venv\Scripts\python.exe -m pytest -q tests/test_oracle_integration.py
-Remove-Item Env:SUPPORT_ORACLE_TESTS
-```
-
-The live suite checks exact migration/rerun behavior, Oracle lookup serialization,
-MCP invocation, composite foreign keys, and database-enforced reader restrictions.
-It leaves synthetic records in that test PDB. CI provisions an isolated Oracle
-service for this suite. All four live Oracle integration tests passed in the
-[phase 2 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38299246543).
-Local verification passed 148 tests with the four live tests skipped, validated the
-Compose overlay, and built the wheel with its schema resource. The local Docker
-engine was unavailable, so a local Compose application startup remains unverified.
-
-### Oracle schema discovery (phase 3)
-
-Branch `phase/oracle-03-schema` adds five Oracle-only MCP tools. SQLite keeps its
-existing five customer/policy tools. The new tools use the same runtime reader
-account and do not require owner credentials, catalog-wide grants, embeddings,
-or another database. They read Oracle `ALL_*` dictionary views, never customer rows.
-
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `list_tables` | None | Accessible allowlisted tables, comments, and column counts |
-| `describe_table` | `table` | Columns/types/nullability, constraints, ordered index columns, outbound foreign keys |
-| `get_relationships` | Optional `table` | Inbound and outbound foreign keys, with ordered source/target column pairs |
-| `search_schema` | `query`, optional `limit` (1..50) | Ranked keyword matches in table/column names, types, and comments |
-| `refresh_schema_index` | None | Reloaded metadata version, refresh timestamp, and table count |
-
-Set `SUPPORT_ORACLE_ALLOWED_TABLES=CUSTOMERS,ORDERS,TICKETS` and
-`SUPPORT_ORACLE_SCHEMA_CACHE_TTL_SECONDS=300` (defaults shown). The table list
-accepts 1..50 distinct simple unquoted identifiers, normalized to uppercase; TTL
-accepts 1..3600 seconds. Only accessible tables in the configured
-`SUPPORT_ORACLE_SCHEMA` that also appear in this list are exposed. Both ends of a
-relationship must be in that catalog, so cross-schema or unauthorized targets
-are not disclosed. Qualified names, database links, quoted table names, and
-unauthorized table arguments are rejected. Column names retain Oracle's spelling.
-This allowlist governs discovery; existing fixed customer lookup contracts are
-unchanged. It is not a substitute for database grants or customer authorization.
-
-The process-local cache loads on the first schema call and refreshes on the next
-call after its TTL. An explicit refresh rebuilds it immediately. Updates are
-atomic, concurrent first reads share one load, and a failed refresh invalidates
-the old snapshot and returns a sanitized MCP error. Each result includes
-`schema_version` (a content hash), `refreshed_at` (UTC), and `cache_ttl_seconds`.
-Unchanged metadata retains its version across refreshes. Cached metadata can lag
-DDL or permission changes until refresh/expiry; it must not authorize SQL execution.
-
-Search uses a small in-memory inverted index with case-insensitive word matching,
-underscore splitting, and simple plural matching. It is keyword search, not
-semantic search: `amount cents`, `order`, or a known column/comment keyword are
-good inputs. Results include scores, total match count, and a truncation flag.
-Empty search results are distinct from connection or discovery failures.
-Dictionary reads are bounded to 20,000 rows per metadata query; oversized catalogs
-fail instead of silently returning incomplete metadata. Oracle's
-`SEARCH_CONDITION_VC` may truncate long check expressions; results flag conditions
-that reach its 4000-byte limit. Index expression text is not reconstructed.
-
-Composite relationships are returned as a single foreign key containing ordered
-`column_pairs`. In particular, tickets `(ORDER_ID, CUSTOMER_ID)` refers to orders
-`(ID, CUSTOMER_ID)`; the Oracle SQL planner receives both pairs for that relationship.
-Constraint status and validation state are included. Metadata comments and check
-expressions are untrusted data, not instructions to the model.
-
-`refresh_schema_index` changes only the in-memory cache. Its MCP annotation marks
-that state change; it does not execute DDL or modify customer/policy records.
-The catalog is available through the existing client boundary, for example:
-
-```python
-async with connect_support_tools() as tools:
-    tables = await tools.call("list_tables", {})
-    columns = await tools.call("describe_table", {"table": "orders"})
-    joins = await tools.call("get_relationships", {"table": "orders"})
-    matches = await tools.call("search_schema", {"query": "amount cents"})
-```
-
-Tests cover dictionary joins, composite ordering, authorization scope, caching,
-concurrency, version changes, error redaction, and invocation over real MCP stdio.
-The opt-in Oracle integration suite additionally creates and removes one uniquely
-named test table to verify discovery after grants, column DDL, refresh, and grant
-revocation; it never alters the three customer-data tables for this test. Run the
-same `tests/test_oracle_integration.py` command described above on a dedicated PDB.
-
-Phase 3 validation: 177 local tests passed with five live tests skipped. All five
-live Oracle tests passed in the [phase 3 CI run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38300972259),
-including discovery over MCP, composite relationships, newly granted tables,
-column changes, and grant revocation. Compose configuration and dependency checks
-also passed. Local Oracle startup remains unverified because the Docker engine
-was unavailable.
-
-Dictionary references: [ALL_TAB_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/ALL_TAB_COLUMNS.html),
-[ALL_CONS_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/19/refrn/ALL_CONS_COLUMNS.html),
-and [ALL_IND_COLUMNS](https://docs.oracle.com/en/database/oracle/oracle-database/12.2/refrn/ALL_IND_COLUMNS.html).
-
-### Restricted Oracle SQL execution (phase 4)
-
-Branch `phase/oracle-04-query` adds the Oracle-only MCP tool
-`execute_readonly_query(sql, parameters=None, row_limit=50)`. It executes one
-supported Oracle SELECT using the existing reader account. SQLite's tool set and
-the current agent workflow remain unchanged. Example through the existing MCP client:
-
-```python
-result = await tools.call("execute_readonly_query", {
-    "sql": "SELECT o.id, o.status, t.subject FROM orders o JOIN tickets t "
-           "ON t.order_id=o.id AND t.customer_id=o.customer_id "
-           "WHERE o.customer_id=:customer_id ORDER BY o.id",
-    "parameters": {"customer_id": 1},
-    "row_limit": 10,
-})
-```
-
-The validator uses SQLGlot's Oracle dialect and an explicit allowlist of syntax
-tree nodes. It supports SELECTs, ON/USING joins, nonrecursive CTEs, subqueries,
-filters, grouping, ordering, CASE, ordinary row offsets/limits, and a small set of
-built-ins: COUNT, SUM, MIN, MAX, AVG, LOWER, UPPER, LENGTH, ABS, ROUND, COALESCE/NVL,
-and date literals. Arithmetic and string concatenation are supported. Set
-operations, window functions, recursive/hierarchical queries, casts, and other
-unlisted syntax are deliberately unsupported in this first executor.
-
-DDL, DML, PL/SQL, multiple statements, locking reads, hints, package/user-defined
-function calls, sequences, pseudocolumns, database links, and unauthorized objects
-are rejected. Bare and qualified table names are resolved against
-`SUPPORT_ORACLE_SCHEMA` and `SUPPORT_ORACLE_ALLOWED_TABLES`, then rewritten with an
-explicit quoted owner. CTE aliases are distinguished from physical tables.
-Only regenerated validated SQL is executed; comments and original unparsed text
-are never forwarded to Oracle.
-
-Before execution, the service checks accessible physical tables and columns using
-fresh `ALL_TABLES`/`ALL_TAB_COLUMNS` reads on its own connection. Every column and
-alias is resolved against those results; missing/ambiguous columns and dotted
-package-like attributes fail validation. The discovery cache cannot authorize a
-query, including after a grant is revoked. Oracle's reader grants independently
-enforce access, and each query runs in a read-only transaction. These are object
-restrictions for the synthetic demo, not per-customer authorization.
-
-Bind parameters must exactly match SQL placeholder names. Parameter keys are
-lowercase simple identifiers; values are strings of at most 4000 characters,
-signed 64-bit integers, finite floats, or null. Booleans and collections are
-rejected. SQL is limited to 12,000 characters, 500 input syntax nodes, eight
-physical table references, and 50 parameters.
-
-Execution is bounded to two concurrent queries per MCP server. Set
-`SUPPORT_ORACLE_QUERY_TIMEOUT_SECONDS` (default 10, range 1..60) for the async
-deadline covering queueing, connection, metadata checks, execution, and fetching.
-Driver call timeouts also apply. Cancellation requests a server-side break and
-closes the connection; network cleanup can add time beyond the execution deadline.
-There is no background query thread left running after an application timeout.
-The database's own privileges remain necessary even when validation succeeds.
-
-`row_limit` accepts 1..100. An outer Oracle ROWNUM stopkey and bounded fetching
-retrieve at most one extra row to detect truncation. Results have at most 50
-columns, 4000 characters per text/CLOB cell, and a conservative 64 KiB JSON payload
-budget (before MCP transport encoding). Unsupported binary/object types fail.
-The response contains `columns` (names/types), positional `rows`, `row_count`,
-`row_limit`, `tables`, a random `query_id`, `truncated`, and `truncation_reasons`
-(`row_limit`, `cell_limit`, or `byte_limit`). Fractional Oracle NUMBER values are
-exact decimal strings; integral values are JSON integers. Dates/timestamps are ISO
-strings. Always check truncation before claiming complete results. This describes
-the submitted query result; an explicit LIMIT or WHERE clause can still narrow it.
-
-Errors use safe codes (`invalid_sql`, `invalid_columns`, `invalid_parameters`, `unauthorized_object`,
-`unsupported_result`, `timeout`, `database_error`) and the MCP error flag. Logs
-record the random query ID, outcome, successful row count, and elapsed time rather
-than SQL text, parameter values, returned records, credentials, or raw driver errors.
-Tests cover rejected syntax, scope resolution, bind injection, metadata checks,
-output caps, cancellation/cleanup, MCP errors, and live Oracle queries/timeouts.
-
-Phase 4 validation: 270 local tests passed with seven live tests skipped. All seven
-live Oracle tests passed in CI, including query cancellation at the deadline and
-a successful subsequent query. Linux, Windows, and container checks also passed
-([validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38365594245)).
-The async driver handles the server-side break; the service does not send a
-second cancellation signal during connection cleanup. Phase 5 connects discovery and this executor to the SQL agent (below).
-
-References: [SQLGlot scope analysis](https://github.com/tobymao/sqlglot/blob/main/sqlglot/optimizer/scope.py)
-and [python-oracledb asynchronous connections](https://python-oracledb.readthedocs.io/en/stable/user_guide/asyncio.html).
-
-### Schema-grounded SQL agent (phase 5)
-
-Branch `phase/oracle-05-agent` connects discovery to the actual LangGraph SQL node.
-After resolving a customer (including ambiguous-name clarification and follow-up
-context), the node detects the Oracle executor through MCP tool discovery. It calls
-`list_tables`, `search_schema`, `describe_table`, and `get_relationships` before
-asking the model to generate an Oracle SELECT. The planner receives actual columns,
-constraints, indexes, foreign-key column pairs, owner, and schema version.
-
-```mermaid
-flowchart LR
-    User --> Supervisor
-    Supervisor --> SQL[SQL agent: resolve customer]
-    SQL --> Discovery[MCP schema discovery]
-    Discovery --> Planner[Generate Oracle SELECT using metadata]
-    Planner --> Executor[MCP validated read-only executor]
-    Executor --> Evidence[SQL result evidence]
-    Supervisor --> RAG[Policy RAG]
-    Evidence --> RAG
-    Evidence --> Synthesis
-    RAG --> Synthesis
-    Synthesis --> Answer
-    SQL --> SQLite[SQLite fixed lookups]
-    SQLite --> Evidence
-```
-
-All database access stays behind MCP. The agent collects up to eight approved table
-descriptions (60,000 characters of metadata); schema search prioritizes them while
-retaining potential join tables. Mixed schema versions trigger a refresh. Invalid
-SQL, invalid binds, changed metadata, or unavailable approved tables get at most
-one refresh/replan attempt. Timeout and database failures stop immediately; Oracle
-errors never silently fall back to SQLite or fixed history lookups.
-
-Query results preserve columns, positional rows, query ID, schema version, and
-truncation flags in the evidence passed to RAG and synthesis. The final answer must
-reference query evidence, and the application adds a partial-results notice when
-retrieval was truncated. Existing policy citations and combined routing remain in
-place. Requests needing unavailable facts, such as a delivery date absent from the
-schema, can ask for clarification without submitting SQL.
-
-With Oracle configured and the existing chat application running, try:
-
-- "How many orders does Emma Wilson have in each status?"
-- "Show Emma Wilson's orders alongside their support tickets."
-- "Why hasn't Emma Wilson's latest order arrived, and is she eligible for a refund?"
-
-The current workflow remains customer-scoped and asks for a customer for global
-analytics. Customer selection and query filters are model guidance, **not row-level
-authorization**: this synthetic demo has no per-customer access-control boundary.
-The reader account, approved objects, and SQL validator enforce database access.
-Generated SQL can still be semantically wrong; tests with scripted model decisions
-verify orchestration and live execution, not the accuracy of a paid model on every
-natural-language question. Live model evaluation remains a separate demo check.
-
-Phase 5 validation: CI passed on Linux, Windows, and in the container. The general
-suite has 282 passing tests and eight opt-in live tests; all eight live Oracle tests
-passed in the dedicated integration job. The new graph test builds its JOIN from
-discovered composite foreign-key pairs and verifies the rows reaching synthesis.
-Unit tests cover repair limits, schema-version changes, missing metadata, ambiguity,
-combined SQL/RAG routing, query-evidence requirements, and truncation notices.
-See the [phase 5 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38367655691).
-
-### End-to-end verification (phase 6)
-
-Branch `phase/oracle-06-verification` adds a repeatable combined conversation through
-real database storage, PDF extraction, persistent Chroma, MCP stdio, and LangGraph.
-The same scenario runs against SQLite locally and Oracle in the integration job:
-
-1. Ask about Emma's return and verify clarification lists the two real matches.
-2. Select Emma Wilson and retrieve her latest order plus a refund policy passage.
-3. On Oracle, submit an unknown column, then verify one metadata refresh and SQL repair.
-4. Verify the shipped order reaches synthesis alongside the actual PDF passage,
-   and the final answer has the verified filename/page citation and asks for delivery information.
-5. Follow up about her order, then switch to a general policy question; verify fresh
-   evidence and no leftover customer records in the policy-only answer.
-6. Reject a write on Oracle and verify orders remain readable afterward.
-
-Run the local scenario without API credentials:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q tests/test_end_to_end.py
-```
-
-The Oracle case uses the same opt-in `SUPPORT_ORACLE_TESTS=1` and disposable database
-configuration as the existing integration suite. CI runs both scenarios with all
-Oracle integration tests. Model decisions and embeddings are deterministic test
-implementations; production code has no fake-model mode. These checks establish
-component integration and recovery, not natural-language model quality.
-
-Phase 6 validation: 283 local tests passed with nine Oracle-dependent cases skipped.
-Linux, Windows, and container CI checks passed. The integration job passed all ten
-tests: eight Oracle integration tests plus this combined scenario on both backends.
-See the [phase 6 validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38368764665).
-A paid live-model evaluation was not run as part of this automated verification.
-
-For a live model demonstration, complete the Oracle setup and policy ingestion
-instructions above, configure your API key locally, and run the existing chat CLI:
-
-```powershell
-.\.venv\Scripts\python.exe -m support_ai.chat --question "Can Emma return her latest order?" --question "I mean Emma Wilson" --question "Show her latest order" --question "What is the refund policy?"
-```
-
-This command makes paid model and embedding calls. Check that ambiguity is resolved,
-SQL evidence matches the synthetic records, policy answers cite the ingested PDF,
-and the assistant asks for missing delivery facts rather than approving a refund.
-Also try the aggregation and JOIN questions in phase 5. Record the model name,
-question, answer, trace, sources, and any incorrect SQL semantics when assessing
-quality; never treat scripted test success as a live-model evaluation result.
-
-### Live-model evaluation (phase 7)
-
-Branch `phase/oracle-07-live-evaluation` adds an opt-in evaluation runner:
-
-```powershell
-.\.venv\Scripts\python.exe -m support_ai.evaluate --backend oracle --output output/evaluation/oracle-live.json
-```
-
-The configured backend must match the argument. The runner uses the application's
-configured chat model (default `gpt-4.1-mini`) and makes paid model/embedding calls.
-It expects the synthetic Emma Wilson dataset and an ingested policy index. Seven
-questions cover ambiguity, clarification, follow-ups, aggregates, JOINs, combined
-policy questions, and topic changes. `--backend sqlite` checks the compatibility
-path; it does not validate Oracle SQL generation.
-
-Reports include baseline records, model decisions, tool calls, query results,
-answers, elapsed times, and structural checks. They contain record/document text,
-so keep them under ignored `output/evaluation/` and review before sharing. They do
-not include connection settings or API keys. Structural checks are not semantic
-accuracy scores: compare generated SQL and answers against the baseline records
-and retrieved policy passages. The runner stops early if the supervisor cannot
-access the model. See [OpenAI evaluation guidance](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
-for separating workflow checks from task-specific answer evaluation.
-
-The initial local attempt received authentication errors; correcting the local API
-key resolved model access. The subsequent SQLite run found a routing error: a request
-for orders alongside tickets was sent to both SQL and policy retrieval. The supervisor
-prompt now explicitly distinguishes multiple database entities from policy questions.
-A rerun with `gpt-4.1-mini` passed all seven structural checks, and manual inspection
-confirmed the returned IDs, counts, citations, and missing-delivery clarification
-against the retrieved evidence. This is one small smoke evaluation, not a general
-accuracy benchmark. Reports remain local under ignored `output/evaluation/`.
-
-Oracle live evaluation completed on 2026-10-14 with the same seven questions and
-`gpt-4.1-mini`. The first run exposed a CTE projection mistake that the repair repeated.
-Column/alias validation now returns the safe `invalid_columns` code, and the planner
-is instructed to audit CTE projections and join keys. The rerun passed all seven
-structural checks. Reviewed SQL used discovered columns, customer binds, aggregation,
-and both column pairs of the ticket/order relationship; reviewed answers matched
-the retrieved records and policy evidence. The Oracle-backed browser demo also
-passed aggregation, refund clarification, and policy-source display checks.
-
-Local setup findings: upgrading Docker Desktop and clearing its stale extension
-process restored the engine. Use `127.0.0.1:1521/FREEPDB1` for the Windows loopback
-connection: measured connection time was about 0.04 seconds versus 2.07 seconds
-with `localhost` on the evaluation machine. The database limits were not relaxed.
-See [the evaluation report](docs/evaluations/phase-07.md) for results and limitations.
-These are small smoke evaluations, not a statistical accuracy benchmark. No final
-merge has been performed.
-
-### Existing application
-
-**Locally runnable support application.** Configuration, reproducible fictional
-data, restricted read-only lookups, PDF extraction, OpenAI embeddings, persistent
-Chroma search, an official SDK MCP server/client, a LangGraph assistant, and automated
-tests are implemented. FastAPI serves chat and PDF uploads; Streamlit provides the
-web interface. A terminal chat, Docker configuration, and CI workflow are included.
-
-
-The local application has been tested on Windows/Python 3.13. Hosted CI passed
-on Windows and Linux, including a Docker image build and container test run.
-Docker Compose configuration validates; local Compose startup remains unverified
-because the local Docker engine is not responding.
-
-The phase branches form a stack: each includes the preceding phase's commits.
-The complete implementation is delivered through
-[pull request #1](https://github.com/AsserIsmail/customer-support-multi-agent/pull/1)
-from `phase/06-delivery` to `main`.
-
-## Architecture
-
-```text
-Streamlit -> FastAPI -> LangGraph supervisor
-                        | SQL specialist -> MCP client --+
-                        | RAG specialist -> MCP client --+-> MCP server
-                        |                                    | SQLite lookups
-                        |                                    | Chroma policy search
-                        +-> evidence synthesis -> cited answer
-
-PDF upload -> PyMuPDF -> page-aware chunks -> OpenAI embeddings -> Chroma
-```
-
-Agents use MCP tools exclusively for customer and policy retrieval. The SQL
-specialist calls constrained lookup tools rather than executing generated SQL.
-The supervisor routes to either specialist or both, with conversation state
-supporting follow-up questions. The graph and data services are independently testable.
-
-## Local setup (PowerShell)
-
-Use **Python 3.13**; development was tested on Windows with Python 3.13.3.
-The supported Python range is deliberately limited to the verified minor version.
-Use an isolated virtual environment:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-lock.txt
-.\.venv\Scripts\python.exe -m pip install --no-deps -e .
-.\.venv\Scripts\python.exe -m support_ai.seed
-.\.venv\Scripts\python.exe -m pytest -q
-```
-
-`requirements-lock.txt` records the tested Windows/Python 3.13 dependency versions.
-Windows-only dependencies have platform markers. Linux may resolve additional
-platform-specific dependencies, and its execution is not yet verified locally.
-For development with newly resolved compatible versions instead of the lock:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-```
-
-On macOS/Linux, use `.venv/bin/python` instead of the Windows interpreter path.
-Commands assume the repository root is the current directory.
-
-### Configuration
-
-| Environment variable | Default | Purpose |
-| --- | --- | --- |
-| `SUPPORT_DB_PATH` | `data/support.db` | SQLite path, relative to the working directory |
-| `SUPPORT_LOG_LEVEL` | `INFO` | DEBUG, INFO, WARNING, ERROR, or CRITICAL |
-| `OPENAI_API_KEY` | Unset | Required for live policy ingestion and nonempty-index search |
-| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
-| `OPENAI_CHAT_MODEL` | `gpt-4.1-mini` | Model for routing, specialists, and synthesis |
-| `AGENT_TIMEOUT_SECONDS` | `60` | Timeout per model request, 5..180 seconds; one retry |
-| `API_HOST` | `127.0.0.1` | API bind address |
-| `API_PORT` | `8000` | API port |
-| `SUPPORT_API_URL` | `http://127.0.0.1:8000` | Backend URL used by Streamlit |
-| `API_CHAT_TIMEOUT_SECONDS` | `300` | Overall chat request deadline, 1..900 seconds |
-| `API_SESSION_TTL_SECONDS` | `3600` | Idle conversation lifetime, 1..86400 seconds |
-| `API_MAX_SESSIONS` | `100` | Maximum live conversations, 1..1000 |
-| `CHROMA_PATH` | `data/chroma` | Local persistent vector store |
-| `CHROMA_COLLECTION` | `company_policies` | Index name; change for a fresh policy set |
-| `POLICY_CHUNK_SIZE` | `1200` | Maximum characters per chunk (100..4000) |
-| `POLICY_CHUNK_OVERLAP` | `200` | Overlapping characters, smaller than chunk size |
-| `POLICY_MAX_DISTANCE` | `0.6` | Maximum cosine distance accepted by search (0..2) |
-
-Configuration loads `.env` from the current working directory. Process environment
-variables take precedence. Copy `.env.example` to `.env` if it does not already
-exist, then edit the copy locally. Keep the API key out of chat, source code, and
-Git. The seed command and automated tests need no key. To choose a different database:
-
-```powershell
-$env:SUPPORT_DB_PATH = "data/demo.db"
-.\.venv\Scripts\python.exe -m support_ai.seed
-# Alternatively, supply an explicit path:
-.\.venv\Scripts\python.exe -m support_ai.seed --db data/another-demo.db
-```
-
-## Run the web application
-
-From the repository root, seed the demo database and generate its fictional PDF:
-
-```powershell
-.\.venv\Scripts\python.exe -m support_ai.seed
 .\.venv\Scripts\python.exe -m support_ai.demo_pdfs
+.\.venv\Scripts\python.exe -m support_ai.policies ingest output/pdf/demo_policies.pdf
 ```
 
-Ensure your local `.env` contains `OPENAI_API_KEY`. Start two terminals:
+You can also upload your own policy PDFs through the chat sidebar. Ingestion persists embeddings in Chroma; unchanged documents do not need to be ingested on every startup.
 
-**Terminal 1 - API**
+### 4. Start the application
+
+In one terminal:
 
 ```powershell
 .\.venv\Scripts\python.exe -m support_ai.api
 ```
 
-**Terminal 2 - Streamlit**
+In a second terminal, from the same repository:
 
 ```powershell
 .\.venv\Scripts\python.exe -m streamlit run streamlit_app.py
 ```
 
-Open [the support app](http://127.0.0.1:8501). Select the generated
-`output/pdf/demo_policies.pdf` in the sidebar and click **Add policy**. If it was
-already ingested, the app reports that it is indexed. Then try:
+Open **http://localhost:8501**. The API runs at **http://127.0.0.1:8000**, with interactive endpoint documentation at `/docs`.
 
-1. "Show Emma's open support tickets."
-2. "I mean Emma Wilson."
-3. "What was her latest order?"
-4. "Can she return that order under the refund policy?"
-5. "What is the standard shipping policy?"
-
-**New conversation** clears the current backend conversation and the displayed
-messages. Policy documents remain shared across conversations. Each browser
-connection keeps its own conversation credentials in Streamlit session state;
-the UI never asks for or displays your OpenAI key. Refreshing the browser may
-start a new session. Use Ctrl+C in each terminal to stop the servers.
-
-### API endpoints
-
-Interactive endpoint documentation is at [API docs](http://127.0.0.1:8000/docs).
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health` | Liveness and configuration-presence checks; no paid model request |
-| `POST /sessions` | Create a random session ID and bearer token |
-| `POST /chat` | JSON with `session_id` and `message`; returns answer, sources, status, route, trace |
-| `POST /policies?session_id=...` | Multipart `file` PDF upload |
-| `DELETE /sessions/{session_id}` | Clear the session and its graph checkpoints |
-
-Chat, upload, and delete require `Authorization: Bearer <session token>`. The token
-comes from `/sessions`, not OpenAI. Tokens are returned only when creating a
-session, never in chat responses. Another session's token cannot read or clear
-your conversation. These temporary conversation credentials do **not** authenticate
-a real user or restrict access to particular customer records.
-
-Chat outcomes (`answered`, `needs_clarification`, `insufficient_evidence`, `error`)
-are represented in the JSON result. Request failures use HTTP codes: 400 for
-invalid PDFs or rejected ingestion, 401 for expired/invalid conversation
-credentials, 409 for a busy conversation or upload, 413 for oversized bodies,
-422 for invalid inputs, 503 for missing chat setup or session capacity, 504 for
-chat timeouts, and 502 for unexpected service failures. Error responses avoid
-echoing request contents or raw provider exceptions.
-
-### Local service behavior
-
-- Use **one API worker**. It owns one MCP subprocess, in-memory conversation state,
-  and a lock serializing policy ingestion. Multiple workers would split session
-  state and would not share the upload lock.
-- Idle sessions expire after one hour by default. Expired checkpoints are removed
-  lazily on the next session operation. Busy sessions are not expired mid-request.
-  An API restart clears all sessions; the UI then prompts for a new conversation.
-- PDF files are processed through the existing ingestion service. Original upload
-  files are not retained; extracted passages and embeddings persist in Chroma.
-  Filenames are metadata, never destination paths. Upload limits are enforced in
-  Streamlit and the API, including actual bytes for chunked requests.
-- The API starts without an OpenAI key so `/health` and setup diagnostics remain
-  available. Chat and new embeddings still require a valid key and API credits.
-  A healthy endpoint does not prove provider access or document retrieval quality.
-- Both services bind to loopback by default. This is a local synthetic-data demo;
-  account authentication, per-customer authorization, durable sessions, and
-  deployment hardening are not included. Do not expose the ports publicly.
-- API access logging is disabled by the launcher to avoid logging conversation
-  identifiers from upload URLs. Operational logs contain failure classes and
-  routing decisions, not keys or full request bodies.
-
-## Docker (optional)
-
-Prerequisites: Docker Desktop with its Linux-container engine running and Docker
-Compose v2. Keep your local `.env` at the repository root. The API receives the key
-at runtime; the build context excludes `.env`, generated data, uploads, and logs.
-The Streamlit container receives no OpenAI key. The image runs as a non-root user.
+For subsequent runs, start the Oracle container if needed and launch these two processes. Installation, provisioning, migration, and policy ingestion are setup steps, not daily startup steps. Stop the application with `Ctrl+C` in each terminal; stop Oracle without deleting its data with:
 
 ```powershell
-docker compose config --quiet
-docker compose up --build -d
-docker compose exec api python -m support_ai.policies ingest /app/demo/demo_policies.pdf
+docker compose -f compose.yaml -f compose.oracle.yaml stop oracle
 ```
 
-The last command makes a paid OpenAI embedding request. The image includes only
-the reproducible fictional PDF; private PDFs are never copied into it.
+## Try it
 
-Open [containerized support app](http://127.0.0.1:18501) or
-[containerized API docs](http://127.0.0.1:18000/docs). These separate ports avoid
-conflicting with the native app. Override `DOCKER_UI_PORT` and `DOCKER_API_PORT`
-in `.env` if necessary.
+Ask these in one conversation:
 
-Compose seeds an empty database before starting the API and waits for API health
-before starting Streamlit. A named volume preserves SQLite and Chroma data across
-container recreation; native `data/` is separate and is not mounted. Seeding skips
-populated databases. Stop the stack while retaining that volume with:
+1. “What is Emma's latest order?” — the assistant should ask which Emma.
+2. “Emma Wilson.” — it should resolve the customer and retrieve her order.
+3. “Does she have any open tickets?” — it should reuse the conversation context.
+4. “Show her orders alongside their support tickets.” — Oracle uses discovered relationships to build the query.
+5. “Can she get a refund for her latest order?” — combines records with policy evidence and asks for missing eligibility facts.
+6. “What is the general refund policy?” — retrieves policy passages with citations.
 
-```powershell
-docker compose down
-```
-
-Do not add `--volumes` unless you intend to delete the container's saved data.
-Inspect operational status with `docker compose ps` and logs with
-`docker compose logs --tail 50 api`. Avoid sharing `docker compose config` output
-without `--quiet`: expanded environment values can include your key.
-
-Offline container tests (no key needed):
-
-```powershell
-docker build --target test -t support-tests .
-docker run --rm support-tests
-```
-
-**Verification limit:** Compose syntax was validated here. The installed Docker
-engine did not respond, so neither these container commands nor Linux runtime
-behavior are claimed as tested.
-
-## Data and lookups
-
-The seed command creates 25 fictional customers, 75 orders, and 75 tickets using
-fixed dates and `example.com` email addresses. Emma Wilson and Emma Chen each have
-three historical orders and associated tickets. Amounts are integer cents in USD.
-Historical dates are intentional: this fixture does not imply current eligibility
-under any future refund policy.
-
-Seeding uses one transaction for all records. An existing database containing any
-customer, order, or ticket records is preserved and seeding is skipped. To generate
-a fresh demo, choose a new database path. There is no destructive reset option.
-
-Example from Python after installation and seeding:
-
-```python
-from support_ai.config import Settings
-from support_ai.database import CustomerRepository
-
-records = CustomerRepository(Settings.from_env().db_path)
-matches = records.find_customers("Emma")  # Both Emmas; ask which customer.
-emma = records.get_customer(1)            # Emma Wilson
-orders = records.get_orders(1)
-tickets = records.get_tickets(1, limit=10, offset=0)
-```
-
-Lookup behavior:
-
-- Name/email search is a literal substring search; all matches are returned.
-  SQLite's default case-insensitive matching covers the ASCII demo names.
-- Customer IDs must be positive integers. Histories use newest-first ordering
-  and pagination, with a maximum of 100 records per request.
-- Missing customers return `None`; unmatched searches and histories return `[]`.
-  Call `get_customer` to distinguish a missing customer from an empty history.
-- Unavailable or malformed databases raise `DataAccessError`, not empty results.
-- Lookup connections use SQLite `mode=ro` plus `query_only`. Inputs are bound
-  parameters; callers cannot supply SQL through the public lookup methods.
-- Foreign keys prevent orphaned records and tickets linked to another customer's
-  order. Customer records and search terms are not written to application logs.
-
-The repository is the internal data layer used by the MCP server, not a network
-authorization boundary. Authentication and access control must be considered
-before exposing real customer records outside a local demo.
-
-## Project layout
-
-```text
-src/support_ai/config.py     Environment configuration and logging
-src/support_ai/database.py   Schema, connection handling, restricted lookups
-src/support_ai/seed.py       Reproducible seed CLI
-src/support_ai/policies.py   PDF chunks, OpenAI embeddings, Chroma ingestion/search CLI
-src/support_ai/demo_pdfs.py  Reproducible fictional policy PDF generator
-src/support_ai/mcp_server.py Restricted MCP tools over stdio
-src/support_ai/mcp_client.py MCP-only client and diagnostic CLI
-src/support_ai/agent_models.py Typed model decisions and role prompts
-src/support_ai/agents.py     LangGraph supervisor, specialists, and conversation state
-src/support_ai/chat.py       Terminal chat and scripted conversation CLI
-src/support_ai/api.py        FastAPI endpoints, sessions, and input limits
-src/support_ai/web_runtime.py Lifespan-owned MCP/agent resources and ingestion
-src/support_ai/web_client.py Streamlit HTTP client
-streamlit_app.py             Web chat and policy uploads
-.streamlit/config.toml       Local binding, theme, and upload limit
-tests/test_database.py      Data integrity and lookup tests
-tests/test_policies.py      PDF, embedding adapter, persistence, and search tests
-tests/test_mcp.py           Real subprocess MCP integration tests
-tests/test_agents.py        Graph routing, evidence, follow-ups, and failure tests
-tests/test_api.py           HTTP contracts, sessions, uploads, and full retrieval path
-tests/test_frontend.py      Streamlit AppTest chat and error tests
-.env.example               Configuration names; no credentials
-```
-
-## Policy ingestion and search demo
-
-Generate the fictional three-page policy PDF, set your key in `.env`, then run:
-
-```powershell
-.\.venv\Scripts\python.exe -m support_ai.demo_pdfs
-.\.venv\Scripts\python.exe -m support_ai.policies ingest output/pdf/demo_policies.pdf
-.\.venv\Scripts\python.exe -m support_ai.policies search "How long do I have to request a refund?"
-.\.venv\Scripts\python.exe -m support_ai.policies search "When should a delayed shipment be investigated?"
-```
-
-Ingestion and search send document chunks or query text to OpenAI's embedding API
-and incur API usage. PDF creation and extraction are local. Search returns JSON
-passages with text, filename, one-based page number, chunk/document IDs, embedding
-model, cosine distance, and a citation such as `[demo_policies.pdf, p. 1]`.
-The ingestion/search CLI returns evidence passages; the chat application uses
-LangGraph to synthesize answers from those passages.
-
-### Ingestion decisions and limits
-
-- PyMuPDF extracts and normalizes text separately for each page. Chunks overlap
-  within a page and never cross a page boundary, so citations remain precise.
-- PDFs are limited to 20 MiB, 200 pages, 100,000 extracted characters per page,
-  and 1,000 chunks. Malformed, locked, empty, scanned, or partly textless PDFs
-  are rejected with a clear message. OCR is not included. Complex multi-column
-  layouts may need preprocessing; extracted reading order is not guaranteed.
-- SHA-256 of the PDF bytes identifies the document. Repeat uploads, including
-  renamed copies, return `duplicate` and preserve the original source filename
-  without another embedding request. Visually identical PDFs with different bytes
-  are different documents.
-- A changed document with an existing filename is rejected. To revise a policy
-  set, choose a new collection and ingest the intended set there. Do not mix
-  obsolete and current versions by renaming them into the same collection.
-- Model and chunk settings are stored in collection metadata. Changes require a
-  new collection to prevent mixing incompatible embeddings or chunk layouts.
-- All embeddings are obtained before the single bounded Chroma upsert. Stable
-  chunk IDs make retries idempotent. A provider failure leaves existing records
-  unchanged. This is a local, single-writer demo; concurrent uploads/replacements
-  are not supported yet. Chroma write failures are reported and may need a retry.
-- Search uses cosine distance and a configurable cutoff. Empty results mean no
-  evidence passed the cutoff, not proof that the company has no relevant policy.
-  The default cutoff is a starting value, not a calibrated confidence score.
-- SDK retries are limited to two, with a 30-second request timeout. Operational
-  logs report failure classes rather than provider error bodies or document text.
-
-Implementation references: [OpenAI embeddings](https://developers.openai.com/api/docs/guides/embeddings),
-[Chroma persistent client](https://docs.trychroma.com/reference/python/client), and
-[PyMuPDF text extraction](https://pymupdf.readthedocs.io/en/latest/recipes-text.html).
-
-## MCP server and client
-
-The official `mcp` Python SDK (tested with 2.2.0) runs a local stdio server. The
-client launches it as a child process, initializes a protocol session, and calls
-its tools. stdout is reserved for MCP messages; operational logs go to stderr.
-No network port is opened. Run from the repository root after seeding:
-
-```powershell
-# Discover tools and look up Emma through MCP; no API request required.
-.\.venv\Scripts\python.exe -m support_ai.mcp_client
-
-# Also search the previously ingested policy collection; uses OpenAI embeddings.
-.\.venv\Scripts\python.exe -m support_ai.mcp_client --policy-query "What is the refund window?"
-```
-
-To attach an external MCP host, configure the server command as the absolute path
-to `.venv/Scripts/python.exe`, arguments as `["-m", "support_ai.mcp_server"]`, and
-the working directory as the repository root. The equivalent installed command is
-`support-mcp`. Running the server directly waits for protocol input; it is not an
-interactive chat terminal.
-
-| Tool | Arguments | Result |
-| --- | --- | --- |
-| `customer_lookup` | `query` | Matching profiles; `found`, `ambiguous`, or `not_found` |
-| `customer_profile` | `customer_id` | One profile or `not_found` |
-| `order_lookup` | `customer_id`, optional `limit`, `offset` | Orders with `next_offset` |
-| `support_tickets` | `customer_id`, optional `limit`, `offset` | Tickets with `next_offset` |
-| `policy_search` | `query`, optional `limit` | Cited passages or `no_evidence` |
-
-Histories distinguish `customer_not_found` from an `empty` page. Tool failures set
-the MCP error flag; they are never returned as empty successful searches. Numeric
-arguments require actual integers; IDs are positive, history limits are 1..100,
-and policy limits are 1..20. Name/email search is literal, not a natural-language
-SQL engine. Interpreting full user questions is Phase 4's responsibility.
-
-The SQLite tools expose no arbitrary SQL, file reading, upload, ingestion, or mutation
-operation. Oracle additionally exposes the restricted query and metadata tools
-documented above. SQLite customer reads retain read-only enforcement. Policy tools
-open an existing collection; a missing index produces an actionable error rather
-than silently creating one. Chroma may maintain internal storage files while
-opening/searching its local database, but the tool never adds or modifies policy
-records. PDF ingestion remains a separate operator command.
-
-MCP read-only annotations describe behavior; enforcement comes from the restricted
-implementations. The local process can access synthetic records for every customer;
-this is not per-user authorization. Do not expose it as a public service without
-adding authentication and customer access controls.
-
-The agents use this client boundary; it imports no database or policy implementation:
-
-```python
-from support_ai.mcp_client import connect_support_tools
-
-async def lookup():
-    async with connect_support_tools() as tools:
-        return await tools.call("customer_lookup", {"query": "Emma"})
-```
-
-Keep connection entry and exit in the same async task. A connection reuses its
-server process for multiple calls and closes it on exit. The default request
-timeout is 120 seconds. Missing data or credentials fail only the relevant tool;
-SQL tools do not need a policy index or OpenAI key.
-
-SDK reference: [official MCP Python SDK](https://py.sdk.modelcontextprotocol.io/).
-
-## Conversational assistant (Phase 4)
-
-After seeding records, ingesting the policy PDF, and setting `OPENAI_API_KEY`, start:
+Terminal alternative:
 
 ```powershell
 .\.venv\Scripts\python.exe -m support_ai.chat
 ```
 
-Type `/new` to clear the current conversation or `/quit` to exit. For a repeatable
-conversation, use multiple `--question` flags in the same invocation:
+Use `/new` to reset the conversation and `/quit` to exit.
+
+<details>
+<summary>Optional: run the application in Docker too</summary>
+
+After completing the Oracle database setup above, run:
 
 ```powershell
-.\.venv\Scripts\python.exe -m support_ai.chat --question "Show Emma's open tickets." --question "I mean Emma Wilson." --question "What was her latest order?" --question "Can she return that order under the policy?"
+docker compose -f compose.yaml -f compose.oracle.yaml up --build -d api ui
 ```
 
-Each scripted response includes `status`, `answer`, `sources`, `route`, and `trace`.
-The trace lists the graph nodes that ran, making routing reviewable. The terminal
-interface prints the answer. This sends questions and relevant synthetic records
-and policy passages to OpenAI for inference. With SQLite, a SQL turn normally makes three model
-calls; a combined turn makes four, plus a query-embedding request. Oracle adds one
-SQL-generation call and, only after a recoverable query failure, one repair call.
+Open **http://localhost:18501**; the API is on **http://127.0.0.1:18000**. Compose runs the migration service before starting the API and uses the reader account for application queries.
 
-### Graph behavior
+The Docker application uses its own policy storage volume. Upload `output/pdf/demo_policies.pdf` through this UI even if you already ingested it locally.
 
-```text
-START -> supervisor -> SQL specialist -> synthesis -> END
-                    -> RAG specialist -> synthesis -> END
-                    -> SQL specialist -> RAG specialist -> synthesis -> END
+For an entirely SQLite-based container demo, set `SUPPORT_DB_BACKEND=sqlite` and use `docker compose up --build -d` instead.
+
+Stop the stack with `docker compose -f compose.yaml -f compose.oracle.yaml down` (or `docker compose down` for SQLite). Named volumes retain data; avoid `--volumes` unless you intend to remove it.
+
+</details>
+
+## Verify and evaluate
+
+Run the local automated suite; live integration tests skip without their dedicated environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Clarification or a retrieval failure ends the turn early. Each path also runs a
-small finish node to record conversation history.
+Run the conversational evaluation against your configured Oracle database and ingested policies. This makes real model calls and writes a local report:
 
-- **Supervisor:** uses a structured model decision to choose SQL, RAG, both,
-  clarification, or an out-of-scope reply. It rewrites follow-ups into standalone
-  requests and separates a new topic from an unfinished prior request.
-- **SQL specialist:** resolves the customer through MCP lookup tools. Multiple
-  matches produce a deterministic clarification listing actual matches. A new
-  customer replaces the previously selected customer. SQLite uses fixed history
-  lookups and Python status filters. Oracle discovers schema and relationships,
-  generates a bound SELECT, and calls the validated MCP executor.
-- **RAG specialist:** produces a focused policy query and calls `policy_search`
-  through MCP. No matching policy evidence prevents a policy conclusion.
-- **Synthesis:** receives fresh evidence from this turn, then returns typed answer
-  blocks with evidence IDs. Unknown IDs or missing references are rejected. Policy
-  citations are rendered by Python from retrieved metadata, rather than invented
-  by the model. Combined answers must reference both SQL and policy evidence.
-- **Conversation state:** LangGraph's in-memory checkpointer separates threads.
-  The prompt sees at most six recent turns plus the selected customer and pending
-  request. `/new` deletes that thread's checkpoints. State is lost on process exit;
-  durable history and user authentication are not implemented. Requests for the
-  same thread cannot run concurrently.
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.evaluate --backend oracle
+```
 
-### Limits and error handling
+Use `--backend sqlite` for the SQLite workflow. CI also exercises Oracle integration with a dedicated database. See the [evaluation report](docs/evaluations/phase-07.md) for recorded results, issues found, and fixes. Live smoke checks demonstrate the tested scenarios; they do not establish general answer accuracy.
 
-The graph has no autonomous tool loop. SQLite retrieval is bounded to four pages of
-50 records per requested history, and up to 50 matching records are sent to
-synthesis. Oracle allows two planning attempts and at most 100 result rows, with
-additional query time, column, cell, and payload limits described above. Evidence marks incomplete retrieval and omitted records. Policy search
-returns at most five passages. Questions are capped at 4,000 characters. Model
-requests have a configurable timeout and one retry. Errors are returned as an
-explicit `error` status without raw provider details or stale answers.
+## Scope and limits
 
-Prompts treat documents and tickets as untrusted data and require clarification
-for missing facts. In particular, order dates do not establish delivery dates, so
-the demo cannot confirm return eligibility merely from a shipped order.
+- Oracle access is restricted to approved tables and read-only queries. Results have row, column, text, payload, and time limits; truncated results are identified in the answer.
+- Customer identity is clarified before customer-specific retrieval. Schema discovery and SQL validation constrain execution but cannot guarantee that generated SQL answers the intended question.
+- This is a local demonstration: there is no authentication or per-customer authorization. Conversation state is in memory, while database records and policy embeddings persist. Uploaded policies are shared across sessions.
+- The API `/health` endpoint reports application liveness/configuration; it does not prove Oracle connectivity.
 
-Citation validation verifies reference provenance; it does not prove every
-generated claim is supported. Routing and synthesis remain model-driven and can
-make mistakes. Use the recorded trace and returned sources to assess answers.
-If an answer fails evidence validation, the application returns an error instead
-of displaying the unverified draft. This is a local assessment demo, not an
-automated refund or customer account management system.
-
-References: [LangGraph graph API](https://docs.langchain.com/oss/python/langgraph/graph-api),
-[LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence),
-[LangChain OpenAI integration](https://docs.langchain.com/oss/python/integrations/chat/openai), and
-[OpenAI structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
-
-## Validation and demo questions
-
-Tests cover deterministic seeds, preservation of existing data, Emma ambiguity,
-missing information, literal search inputs, ID/pagination validation, read-only
-enforcement, foreign keys, and configuration. Tests create isolated temporary
-databases and do not require network access or an OpenAI key. Policy tests use
-real PDF extraction and Chroma storage with deterministic test vectors. They
-exercise page citations, duplicate handling, persistence across processes,
-provider failures, index compatibility, and upload limits. Mocked OpenAI adapter
-tests verify batching and error handling, not live semantic quality. Run the
-ingest/search commands above for a live check after configuring the key.
-
-MCP tests perform discovery and tool calls over actual stdio subprocess connections.
-They check ambiguity, pagination, invalid arguments, rejected undeclared tools,
-unchanged customer database contents, missing data stores, error isolation, and
-policy citations with real Chroma storage. The test policy server injects fixed
-vectors; production exposes no fake-embedding mode. A separate live MCP search
-checks the OpenAI integration using the configured local key.
-
-Agent tests use the real compiled LangGraph with scripted model decisions. They
-cover routing, fresh evidence per turn, ambiguity, follow-ups, thread isolation,
-history clearing, bounded pagination, status filtering, source validation, and
-model/tool failures. One test runs the graph against a real MCP subprocess with
-seeded SQLite records. These deterministic tests verify orchestration; live model
-checks separately assess interpretation and generated answers.
-
-Example questions for the terminal or web chat:
-
-- "Show Emma's support tickets." (Should clarify which Emma.)
-- "I mean Emma Wilson. What was her latest order?"
-- "What does the refund policy say?" (Requires uploaded policy PDFs.)
-- "Can Emma Wilson return her latest order under the policy?" (Requires both
-  customer history and cited policy evidence; clarify missing facts.)
-
-Each phase is reviewed separately. Do not commit credentials, `.env`, uploaded
-documents, generated databases, Chroma storage, logs, or virtual environments.
-These local artifacts are covered by `.gitignore`.
+Key code: [agent workflow](src/support_ai/agents.py), [Oracle SQL agent](src/support_ai/oracle_agent.py), [MCP tools](src/support_ai/mcp_server.py), [SQL validation](src/support_ai/sql_validation.py), and [query execution](src/support_ai/query_service.py).
