@@ -69,6 +69,11 @@ Use only supplied evidence for customer or company facts; never invent missing f
 PROMPTS = {
     "supervisor": BASE + """Route the current request to sql (customer/order/ticket records),
 rag (general company policies), or both (customer-specific policy eligibility or advice).
+The route both means database records PLUS policy documentation, not multiple database
+entities. Orders alongside tickets, JOINs, counts, IDs, and status summaries are sql
+unless the user also asks for policy rules, eligibility, or policy-based advice.
+Example: 'Show Emma Wilson's orders alongside their support tickets, including both IDs'
+uses route sql. Do not invent a policy question for a records-only request.
 Use history to resolve follow-ups. If pending_request exists and the user clarifies a name,
 resume that request using the clarified name. If they change topic, follow the new topic.
 CRITICAL: The current question takes priority over pending_request and history. A complete,

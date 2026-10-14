@@ -411,6 +411,45 @@ Also try the aggregation and JOIN questions in phase 5. Record the model name,
 question, answer, trace, sources, and any incorrect SQL semantics when assessing
 quality; never treat scripted test success as a live-model evaluation result.
 
+### Live-model evaluation (phase 7, in progress)
+
+Branch `phase/oracle-07-live-evaluation` adds an opt-in evaluation runner:
+
+```powershell
+.\.venv\Scripts\python.exe -m support_ai.evaluate --backend oracle --output output/evaluation/oracle-live.json
+```
+
+The configured backend must match the argument. The runner uses the application's
+configured chat model (default `gpt-4.1-mini`) and makes paid model/embedding calls.
+It expects the synthetic Emma Wilson dataset and an ingested policy index. Seven
+questions cover ambiguity, clarification, follow-ups, aggregates, JOINs, combined
+policy questions, and topic changes. `--backend sqlite` checks the compatibility
+path; it does not validate Oracle SQL generation.
+
+Reports include baseline records, model decisions, tool calls, query results,
+answers, elapsed times, and structural checks. They contain record/document text,
+so keep them under ignored `output/evaluation/` and review before sharing. They do
+not include connection settings or API keys. Structural checks are not semantic
+accuracy scores: compare generated SQL and answers against the baseline records
+and retrieved policy passages. The runner stops early if the supervisor cannot
+access the model. See [OpenAI evaluation guidance](https://developers.openai.com/api/docs/guides/evaluation-best-practices)
+for separating workflow checks from task-specific answer evaluation.
+
+The initial local attempt received authentication errors; correcting the local API
+key resolved model access. The subsequent SQLite run found a routing error: a request
+for orders alongside tickets was sent to both SQL and policy retrieval. The supervisor
+prompt now explicitly distinguishes multiple database entities from policy questions.
+A rerun with `gpt-4.1-mini` passed all seven structural checks, and manual inspection
+confirmed the returned IDs, counts, citations, and missing-delivery clarification
+against the retrieved evidence. This is one small smoke evaluation, not a general
+accuracy benchmark. Reports remain local under ignored `output/evaluation/`.
+
+Oracle live-model evaluation is still blocked: Docker Desktop starts but its log
+reports `dockerd failed to start`; both Docker engine endpoints failed bounded readiness
+checks. Local Oracle connection settings are also absent. Repair Docker Desktop or
+configure a working Oracle reader connection, then run the Oracle command above.
+No successful Oracle live-model evaluation, UI demo, or final merge is claimed.
+
 ### Existing application
 
 **Locally runnable support application.** Configuration, reproducible fictional
