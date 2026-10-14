@@ -30,3 +30,8 @@ has been performed. The earlier automated Oracle CI checks remain separate evide
 Reproduce with `python -m support_ai.evaluate --backend oracle` after provisioning
 Oracle and configuring credentials locally. Use `--backend sqlite` only to evaluate
 the compatibility path. Full reports are written under ignored `output/evaluation/`.
+
+Validation: 288 local tests passed (nine Oracle-dependent skips); targeted post-fix
+agent/evaluation tests passed. Linux, Windows, container, and automated Oracle CI
+jobs all passed: [validation run](https://github.com/AsserIsmail/customer-support-multi-agent/actions/runs/38492142268).
+These Oracle CI tests use deterministic inference and do not remove the local live-model blocker.
