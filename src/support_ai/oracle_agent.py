@@ -51,7 +51,7 @@ async def retrieve_oracle_evidence(tools, model, request: str, customer: dict) -
             })
             return dict(result, schema_version=schema["schema_version"])
         except MCPToolError as exc:
-            if attempt or exc.code not in {"invalid_sql", "invalid_parameters", "schema_changed", "unauthorized_object"}:
+            if attempt or exc.code not in {"invalid_sql", "invalid_columns", "invalid_parameters", "schema_changed", "unauthorized_object"}:
                 raise
             error_code = exc.code
             await tools.call("refresh_schema_index", {})

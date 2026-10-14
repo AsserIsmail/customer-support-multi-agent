@@ -104,7 +104,7 @@ create_server(settings, lambda: PolicyIndex(PolicySettings.from_env(), Embedder(
                     assert synthesis["query"]["data"]["rows"] == [[103, "shipped"]]
                     assert "partial" in combined["answer"]
                     plans = [p for role, p in model.payloads if role == "oracle_sql"]
-                    assert len(plans) == 2 and plans[1]["error_code"] == "invalid_sql"
+                    assert len(plans) == 2 and plans[1]["error_code"] == "invalid_columns"
                     assert plans[1]["schema"]["relationships"]
                 else:
                     assert synthesis["orders"]["data"][0]["id"] == 103

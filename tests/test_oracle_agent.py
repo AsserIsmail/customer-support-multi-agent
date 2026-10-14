@@ -71,13 +71,14 @@ def test_actual_graph_discovers_schema_before_planning_and_execution():
     assert evidence["data"]["schema_version"] == "v1"
 
 
-def test_invalid_query_refreshes_and_repairs_once_with_safe_code():
-    tools = OracleTools(errors=["invalid_sql"])
+@pytest.mark.parametrize("code", ["invalid_sql", "invalid_columns"])
+def test_invalid_query_refreshes_and_repairs_once_with_safe_code(code):
+    tools = OracleTools(errors=[code])
     model = ScriptedModel(route("sql"), sql(), query(), query(), draft(ids=["query"]))
     result = asyncio.run(SupportAssistant(tools, model).ask("Emma orders", thread_id="a"))
     assert result["status"] == "answered"
     repaired = model.payloads[3][1]
-    assert repaired["error_code"] == "invalid_sql"
+    assert repaired["error_code"] == code
     assert repaired["schema"]["schema_version"] == "v2"
     assert "raw detail" not in str(repaired)
     assert [name for name, _ in tools.calls].count("refresh_schema_index") == 1

@@ -143,6 +143,12 @@ Use explicit columns and unique result aliases. Include facts needed by policy r
 for combined questions; dates are not delivery dates and amounts are integer cents.
 For newest records order by the discovered date and primary key descending.
 Return SQL null with clarification if the metadata cannot support the request.
+Every column referenced through a CTE/subquery alias must be present in that
+CTE/subquery's SELECT output. Include join keys in its projection. Prefer a simple
+query over unnecessary chains of CTEs. For latest-order policy questions, retrieve
+the order facts first; do not invent a shipment date or require unrelated tickets.
+If error_code is invalid_columns, audit every qualified column and CTE projection;
+correct missing/ambiguous aliases or simplify the query. Do not repeat unchanged SQL.
 On a repair attempt use refreshed metadata and the safe error code; never broaden scope,
 remove the customer filter, or reinterpret permission errors as empty results.
 """

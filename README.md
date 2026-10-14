@@ -5,7 +5,7 @@ PDFs. Built incrementally for a technical hiring assessment.
 
 ## Implementation status
 
-### Oracle upgrade: phases 1-6
+### Oracle upgrade: phases 1-7
 
 Branch `phase/oracle-01-backend` adds an explicit customer-record backend selector
 and an Oracle adapter for the existing MCP lookup tools. SQLite remains the default.
@@ -21,7 +21,7 @@ For a separately provisioned Oracle database with compatible customer tables, se
 SUPPORT_DB_BACKEND=oracle
 SUPPORT_ORACLE_USER=support_reader
 SUPPORT_ORACLE_PASSWORD=<set locally>
-SUPPORT_ORACLE_DSN=localhost:1521/FREEPDB1
+SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1
 SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER
 SUPPORT_ORACLE_CONNECT_TIMEOUT_SECONDS=5
 SUPPORT_ORACLE_CALL_TIMEOUT_MS=5000
@@ -92,7 +92,7 @@ passwords does not rotate passwords already stored in an existing database volum
 For a native application connecting to this container, configure
 `SUPPORT_DB_BACKEND=oracle`, `SUPPORT_ORACLE_USER=SUPPORT_READER`,
 `SUPPORT_ORACLE_SCHEMA=SUPPORT_OWNER`, and
-`SUPPORT_ORACLE_DSN=localhost:1521/FREEPDB1`. Compose sets its internal DSN itself.
+`SUPPORT_ORACLE_DSN=127.0.0.1:1521/FREEPDB1`. Compose sets its internal DSN itself.
 The equivalent native setup/migration commands are:
 
 ```powershell
@@ -285,7 +285,7 @@ exact decimal strings; integral values are JSON integers. Dates/timestamps are I
 strings. Always check truncation before claiming complete results. This describes
 the submitted query result; an explicit LIMIT or WHERE clause can still narrow it.
 
-Errors use safe codes (`invalid_sql`, `invalid_parameters`, `unauthorized_object`,
+Errors use safe codes (`invalid_sql`, `invalid_columns`, `invalid_parameters`, `unauthorized_object`,
 `unsupported_result`, `timeout`, `database_error`) and the MCP error flag. Logs
 record the random query ID, outcome, successful row count, and elapsed time rather
 than SQL text, parameter values, returned records, credentials, or raw driver errors.
@@ -411,7 +411,7 @@ Also try the aggregation and JOIN questions in phase 5. Record the model name,
 question, answer, trace, sources, and any incorrect SQL semantics when assessing
 quality; never treat scripted test success as a live-model evaluation result.
 
-### Live-model evaluation (phase 7, in progress)
+### Live-model evaluation (phase 7)
 
 Branch `phase/oracle-07-live-evaluation` adds an opt-in evaluation runner:
 
@@ -444,11 +444,22 @@ confirmed the returned IDs, counts, citations, and missing-delivery clarificatio
 against the retrieved evidence. This is one small smoke evaluation, not a general
 accuracy benchmark. Reports remain local under ignored `output/evaluation/`.
 
-Oracle live-model evaluation is still blocked: Docker Desktop starts but its log
-reports `dockerd failed to start`; both Docker engine endpoints failed bounded readiness
-checks. Local Oracle connection settings are also absent. Repair Docker Desktop or
-configure a working Oracle reader connection, then run the Oracle command above.
-No successful Oracle live-model evaluation, UI demo, or final merge is claimed.
+Oracle live evaluation completed on 2026-10-14 with the same seven questions and
+`gpt-4.1-mini`. The first run exposed a CTE projection mistake that the repair repeated.
+Column/alias validation now returns the safe `invalid_columns` code, and the planner
+is instructed to audit CTE projections and join keys. The rerun passed all seven
+structural checks. Reviewed SQL used discovered columns, customer binds, aggregation,
+and both column pairs of the ticket/order relationship; reviewed answers matched
+the retrieved records and policy evidence. The Oracle-backed browser demo also
+passed aggregation, refund clarification, and policy-source display checks.
+
+Local setup findings: upgrading Docker Desktop and clearing its stale extension
+process restored the engine. Use `127.0.0.1:1521/FREEPDB1` for the Windows loopback
+connection: measured connection time was about 0.04 seconds versus 2.07 seconds
+with `localhost` on the evaluation machine. The database limits were not relaxed.
+See [the evaluation report](docs/evaluations/phase-07.md) for results and limitations.
+These are small smoke evaluations, not a statistical accuracy benchmark. No final
+merge has been performed.
 
 ### Existing application
 

@@ -98,3 +98,17 @@ def test_column_resolution_expands_stars_and_resolves_ctes():
     query = validate_query("WITH x AS (SELECT id FROM orders) SELECT * FROM x", {}, SETTINGS)
     sql = qualify_query(query, "SUPPORT_OWNER", {"ORDERS": {"ID": "NUMBER"}})
     assert '"X"."ID"' in sql and "*" not in sql
+
+
+def test_cte_missing_join_key_returns_safe_repair_code():
+    columns = {"ORDERS": {"ID": "NUMBER", "CUSTOMER_ID": "NUMBER"},
+               "TICKETS": {"ID": "NUMBER", "ORDER_ID": "NUMBER", "CUSTOMER_ID": "NUMBER"}}
+    prefix = "WITH latest_order AS (SELECT id AS order_id, customer_id FROM orders), "
+    invalid = prefix + "related_ticket AS (SELECT id AS ticket_id FROM tickets) " + \
+        "SELECT l.order_id, r.ticket_id FROM latest_order l LEFT JOIN related_ticket r ON l.order_id=r.order_id"
+    with pytest.raises(QueryError) as error:
+        qualify_query(validate_query(invalid, {}, SETTINGS), "SUPPORT_OWNER", columns)
+    assert error.value.code == "invalid_columns"
+    assert "r.order_id" not in str(error.value)
+    fixed = invalid.replace("SELECT id AS ticket_id FROM tickets", "SELECT id AS ticket_id, order_id FROM tickets")
+    assert qualify_query(validate_query(fixed, {}, SETTINGS), "SUPPORT_OWNER", columns)

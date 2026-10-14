@@ -123,7 +123,7 @@ def test_unknown_column_or_package_attribute_never_executes_user_query(driver):
     service, _, _, cursor = driver
     with pytest.raises(QueryError) as error:
         asyncio.run(service.execute("SELECT evil_package.secret FROM orders"))
-    assert error.value.code == "invalid_sql"
+    assert error.value.code == "invalid_columns"
     assert cursor.execute.await_count == 3  # read-only transaction and two metadata checks only
 
 

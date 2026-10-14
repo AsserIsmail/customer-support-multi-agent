@@ -138,4 +138,4 @@ def qualify_query(query: ValidatedQuery, owner: str, columns: dict[str, dict[str
     except QueryError:
         raise
     except Exception:
-        raise QueryError("invalid_sql", "Query columns or aliases do not match the accessible schema") from None
+        raise QueryError("invalid_columns", "Query columns or aliases do not match the accessible schema") from None
