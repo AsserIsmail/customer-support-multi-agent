@@ -8,7 +8,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 
 from support_ai.agent_models import DecisionModel, RoutePlan, SQLPlan, RAGPlan, AnswerDraft
-from support_ai.mcp_client import SupportTools
+from support_ai.mcp_client import SupportTools, MCPToolError
 from support_ai.oracle_agent import retrieve_oracle_evidence
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,19 @@ class SupportAssistant:
         await self.memory.adelete_thread(thread_id)
 
     def _failure(self, role: str, exc: Exception, trace: list[str]) -> dict:
-        logger.error("Agent node %s failed (%s)", role, type(exc).__name__)
+        if isinstance(exc, MCPToolError):
+            # Only log known labels, never remote messages, SQL, or record values.
+            codes = {"invalid_sql", "invalid_columns", "invalid_parameters", "schema_changed",
+                     "unauthorized_object", "unsupported_result", "timeout", "database_error"}
+            tools = {"customer_lookup", "customer_profile", "order_lookup", "support_tickets",
+                     "list_tables", "search_schema", "describe_table", "get_relationships",
+                     "refresh_schema_index", "execute_readonly_query", "policy_search"}
+            code = exc.code if isinstance(exc.code, str) and exc.code in codes else "unknown"
+            tool = exc.tool if isinstance(exc.tool, str) and exc.tool in tools else "unknown"
+            logger.error("Agent node %s failed (%s) tool=%s code=%s",
+                         role, type(exc).__name__, tool, code)
+        else:
+            logger.error("Agent node %s failed (%s)", role, type(exc).__name__)
         return {"response": response("error", f"I could not complete the {role} step. Please retry; "
                                      "if it continues, check the application configuration and logs."),
                 "trace": trace + [role]}

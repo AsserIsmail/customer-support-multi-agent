@@ -16,9 +16,10 @@ from mcp.types import CallToolResult
 class MCPToolError(RuntimeError):
     """A remote tool returned an error or an unexpected response."""
 
-    def __init__(self, message: str, *, code: str | None = None):
+    def __init__(self, message: str, *, code: str | None = None, tool: str | None = None):
         super().__init__(message)
         self.code = code
+        self.tool = tool
 
 
 class SupportTools:
@@ -33,12 +34,12 @@ class SupportTools:
     async def call(self, name: str, arguments: dict) -> dict:
         result = await self.session.call_tool(name, arguments)
         if not isinstance(result, CallToolResult):
-            raise MCPToolError("Unexpected MCP response type")
+            raise MCPToolError("Unexpected MCP response type", tool=name)
         if result.is_error:
             message = (result.structured_content or {}).get("message", "MCP tool rejected the request")
-            raise MCPToolError(message, code=(result.structured_content or {}).get("code"))
+            raise MCPToolError(message, code=(result.structured_content or {}).get("code"), tool=name)
         if not isinstance(result.structured_content, dict):
-            raise MCPToolError("MCP tool returned no structured evidence")
+            raise MCPToolError("MCP tool returned no structured evidence", tool=name)
         return result.structured_content
 
 
