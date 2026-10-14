@@ -22,7 +22,7 @@ flowchart TD
     API --> GRAPH[LangGraph supervisor and conversation state]
     CLI[Terminal chat] --> GRAPH
     GRAPH --> SQL[SQL agent]
-    GRAPH --> RAG[Policy retrieval agent]
+    GRAPH --> RAG[RAG agent: policy retrieval]
     SQL --> MCP[MCP server: retrieval tools]
     RAG --> MCP
     MCP --> DISC[Oracle schema discovery]
@@ -32,7 +32,8 @@ flowchart TD
     VALID --> ORACLE
     MCP --> LOOKUP[Fixed customer, order, and ticket lookups]
     LOOKUP --> DB[(Selected backend: Oracle or SQLite)]
-    MCP --> CHROMA[(Chroma policy passages)]
+    MCP --> SEARCH[policy_search: embed question and retrieve passages]
+    SEARCH --> CHROMA[(Chroma policy passages)]
     PDF[PDF ingestion and embeddings] --> CHROMA
     SQL --> ANSWER[Answer synthesis with evidence]
     RAG --> ANSWER
@@ -50,6 +51,30 @@ flowchart TD
 | FastAPI, Streamlit, Docker Compose | API, chat interface, and local services |
 
 **Choose one customer database per run.** Oracle is the full schema-aware workflow; SQLite is the simpler default in `.env.example`. Chroma is a separate policy store in either mode. There is no automatic synchronization or fallback between Oracle and SQLite. The migration command copies and verifies a SQLite snapshot into Oracle.
+
+## MCP tools and RAG in action
+
+**MCP (Model Context Protocol)** connects the agent workflow to a local tool server over standard input/output. The agents retrieve records, schema metadata, and policy passages through these tools:
+
+| MCP tools | How the workflow uses them |
+| --- | --- |
+| `customer_lookup`, `customer_profile` | Resolve a name/email or confirmed customer ID before customer-specific retrieval; ask for clarification when multiple customers match. |
+| `order_lookup`, `support_tickets` | Retrieve paginated customer records in the SQLite agent workflow. These tools are also available with Oracle. |
+| `list_tables`, `search_schema` | Discover approved Oracle tables and prioritize metadata relevant to the question. Schema search uses keywords, not embeddings. |
+| `describe_table`, `get_relationships` | Supply actual columns, types, constraints, indexes, and foreign-key pairs to the Oracle SQL planner before it generates a query. |
+| `execute_readonly_query` | Validate and execute the generated Oracle SQL with bound values; return bounded results as answer evidence. |
+| `refresh_schema_index` | Reload cached Oracle metadata before the single allowed repair attempt after a recoverable query/discovery error. |
+| `policy_search` | Retrieve relevant policy text and source/page metadata from Chroma for the RAG agent. |
+
+The schema-discovery, refresh, and generated-query tools are registered only in Oracle mode. They are called by the SQL workflow, rather than merely exposed for external clients.
+
+**RAG (retrieval-augmented generation)** grounds answers in retrieved policy text:
+
+1. **Ingest:** PDF upload or the ingestion CLI extracts text, creates overlapping passages, embeds them with OpenAI, and stores them with source/page metadata in Chroma. Ingestion is separate from the MCP retrieval tools.
+2. **Retrieve:** the RAG agent builds a focused search query from the question and any retrieved customer evidence, then calls `policy_search`. The tool embeds the query and returns up to five passages that meet the configured relevance threshold.
+3. **Answer:** synthesis combines those passages with database evidence and renders policy citations. If no relevant passage is found, the workflow reports insufficient evidence rather than deciding eligibility from records alone.
+
+For example, **“Can Emma Wilson get a refund for her latest order?”** follows: customer resolution → Oracle schema discovery → validated order query → policy search → answer with order facts, policy citations, and any missing eligibility questions. A general policy question skips database retrieval.
 
 ## Run locally
 
